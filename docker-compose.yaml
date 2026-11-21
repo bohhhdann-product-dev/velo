@@ -1,0 +1,19 @@
+name: vela-local
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_DB: vela
+      POSTGRES_USER: vela
+      POSTGRES_PASSWORD: ${VELA_POSTGRES_PASSWORD:-vela_local_only}
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - vela_postgres:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U vela -d vela"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+volumes:
+  vela_postgres:

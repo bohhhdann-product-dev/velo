@@ -1,0 +1,50 @@
+name: Verify
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_DB: vela_test
+          POSTGRES_USER: vela
+          POSTGRES_PASSWORD: ci_only_password
+        ports:
+          - 55432:5432
+        options: >-
+          --health-cmd "pg_isready -U vela -d vela_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    defaults:
+      run:
+        working-directory: frontend
+    env:
+      NUXT_PUBLIC_APP_MODE: demo
+      VELA_TEST_DATABASE_URL: postgres://vela:ci_only_password@127.0.0.1:55432/vela_test
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@73e46992e05b19abd31f2f3c20e0e7370d762115 # v6.1.1
+        with:
+          version: 10.34.6
+          package_json_file: frontend/package.json
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test:studio
+      - run: pnpm test:live
+      - run: pnpm test:server
+      - run: pnpm typecheck
+      - run: pnpm build
