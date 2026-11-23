@@ -17,6 +17,7 @@ import { uploadImage, deleteAsset, ownedAsset } from '../../server/services/medi
 import { getStorage } from '../../server/services/storage'
 import { generatedMediaReservation } from '../../server/services/generated-media'
 import { compactMutationReplies } from '../../server/services/mutation-receipts'
+import { createCheckout, confirmCheckout, getWallet } from '../../server/services/billing'
 import { createModelArkMediaFixture, createSyntheticMp4 } from '../fixtures/modelark-media'
 
 const databaseUrl = process.env.VELA_TEST_DATABASE_URL
@@ -44,6 +45,10 @@ test('durable generations: authorization, atomic canvas placement, safe paid sub
     const db = getDb()
     await db`INSERT INTO app_users(id) VALUES ('generation-alice'), ('generation-bob')`
     const owner = 'generation-alice'
+    process.env.VELA_DEMO_PAYMENTS_ENABLED = 'true'
+    process.env.VELA_ALLOW_DEMO_PROVIDER_SPEND = 'true'
+    const checkout = await createCheckout(owner, { packId: 'starter', idempotencyKey: randomUUID() })
+    await confirmCheckout(owner, checkout.id)
     const image = await sharp({ create: { width: 400, height: 400, channels: 3, background: '#ce2424' } }).png().toBuffer()
     const fixture = await createModelArkMediaFixture(t, { '/image.png': image, '/poster.png': image, '/video.mp4': createSyntheticMp4() })
     let imageCalls = 0, videoCalls = 0, pollCalls = 0
@@ -103,6 +108,8 @@ test('durable generations: authorization, atomic canvas placement, safe paid sub
     await Promise.all([runGenerationWorkerOnce(provider), runGenerationWorkerOnce(provider)])
     assert.equal(imageCalls, 2, 'Concurrent workers claim each take only once')
     const complete = await generationDto(db, owner, accepted.generation.id)
+    assert.equal(complete.priceTokens, 158)
+    assert.equal((await getWallet(owner)).totalTokens, 10_500 - 158)
     assert.deepEqual(complete.takes.map(take => take.status), ['done', 'done'])
     const firstAsset = await ownedAsset(db, owner, complete.takes[0]!.assetId!)
     assert.equal(firstAsset.mime_type, 'image/png')
@@ -135,6 +142,7 @@ test('durable generations: authorization, atomic canvas placement, safe paid sub
     assert.equal((await generationDto(db, owner, uncertain.generation.id)).takes[0]!.status, 'unknown')
     assert.equal(await runGenerationWorkerOnce(uncertainProvider), false)
     assert.equal(uncertainCalls, 1)
+    assert.equal((await getWallet(owner)).reservedTokens, 79, 'Unknown paid outcomes retain token holds')
     await assert.rejects(createGeneration(owner, uncertain.project.id, { generatorId: 'generator', expectedRevision: uncertain.project.revision, clientMutationId: randomUUID() }), { statusCode: 409 })
 
     const crashed = await queue()

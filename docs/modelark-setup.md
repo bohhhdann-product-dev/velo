@@ -2,14 +2,14 @@
 
 Vela uses the existing Clerk identity, PostgreSQL and private media storage. A separate Node worker reads durable jobs from PostgreSQL. No Encore, Redis or public media bucket is required.
 
-Generation remains disabled by default. Project editing, uploads, character sheets, favorites and downloads work without a provider key. The live workspace does not simulate successful generations or invent credit prices.
+Generation remains disabled by default. Project editing, uploads, character sheets, favorites and downloads work without a provider key. The live workspace uses versioned token prices and does not simulate successful generations. A development-only checkout can test buying tokens without charging money; real payment collection is not connected.
 
 ## Connect the account
 
 1. In BytePlus ModelArk, select Singapore (`ap-southeast-1`), activate the intended image/video models, and confirm billing and account limits. An API key alone does not activate models or fund the account.
 2. Create a server API key. Put it directly in the ignored `frontend/.env` for local development, or in the hosting secret manager for deployment. Do not send it in a prompt, commit it, or use a `NUXT_PUBLIC_*` variable.
 3. Use the tested model configuration below. An `ep-…` endpoint is supported only when it is configured for the corresponding model family and capabilities. Other models need an explicit adapter/capability update.
-4. Apply migrations, restart the app and start the worker. Enabling generation authorizes paid provider requests when users press Generate. Keep it disabled until account access and limits have been reviewed.
+4. Stop older workers, apply all migrations through `007_token_wallet.sql`, and deploy matching app/worker versions before enabling admission. Enabling generation authorizes paid provider requests when users press Generate. Keep it disabled until account access, current pricing and limits have been reviewed.
 
 ```dotenv
 VELA_GENERATION_ENABLED=true
@@ -32,15 +32,17 @@ pnpm generation:worker
 
 ## What happens after Generate
 
-The app first saves the canvas. One idempotent request records an immutable prompt/settings/reference manifest and appends output nodes atomically. Each output is a separate durable take; selecting four outputs can cause four paid submissions.
+The app first saves the canvas. One idempotent request records an immutable prompt/settings/reference manifest and token quote, reserves the account's tokens and appends output nodes atomically. Each output is a separate durable take; selecting four outputs reserves four prices and can cause four paid submissions. Insufficient tokens reject the whole batch. Quotes requested from the saved generator remain available while provider generation is paused.
 
 The worker prepares private references as bounded image data, then records its submission marker before calling ModelArk. Image generation is synchronous; video creation returns a task ID that is saved before polling. Vela stores completed files in its own private storage before marking a take complete. Image originals and MP4 bytes remain intact; previews are separate. Authenticated video delivery supports byte ranges.
 
-Admission reserves a media slot and the maximum allowed output size for every take (37 MiB per image, 232 MiB per video including its poster). Uploads and sheet composition respect these reservations. Completion consumes the reservation atomically; rejected/cancelled work releases it. Unconfirmed paid submissions retain theirs until reconciled. This is storage protection, not a spending budget: configure financial limits in BytePlus separately.
+Admission also reserves a media slot and the maximum allowed output size for every take (37 MiB per image, 232 MiB per video including its poster). Uploads and sheet composition respect these storage reservations. Successful delivery spends the token hold and consumes the storage reservation atomically; confirmed failure or cancellation of unsubmitted work releases both. Unconfirmed paid submissions retain their holds until reconciled. Per-account tokens do not replace provider-wide financial limits: configure spending limits in BytePlus separately.
 
 Concurrent workers claim jobs using database leases. A lost paid POST response or an expired submission lease becomes an **unconfirmed** outcome. It is never automatically submitted again. Check the ModelArk task/request history before resolving such a case; Vela does not yet expose a manual reconciliation screen. A storage retry repeats only the download/save, not the paid generation. Provider output URLs are temporary; ingestion retries stop after the retention window.
 
-Live settings intentionally expose a small supported subset: Seedream 5 Pro and Seedance 2.5, three aspect ratios, supported quality levels and video duration. Character sheets work as image references. Frame-guided video uses the provider's adaptive aspect ratio. No billing ledger, customer payment system or guaranteed provider cost estimate is implemented.
+Live settings intentionally expose a small supported subset: Seedream 5 Pro and Seedance 2.5, three aspect ratios, supported quality levels and video duration. Character sheets work as image references. Frame-guided video uses the provider's adaptive aspect ratio. The token ledger is implemented; real customer payment processing is not. Retail quotes apply a 75% markup to the configured provider-cost estimate and round up to whole tokens. Seedream 5 Pro charges for references after the first; still-image references do not carry a blanket Seedance surcharge. Output count multiplies the per-take charge. Actual provider video usage may differ from the estimate, and is not a license to add an undisclosed customer debit.
+
+For test checkout setup and the separate guard against spending provider money with test-funded accounts, see [tokens and test checkout](backend-setup.md#tokens-and-test-checkout). Production rejects test-funded provider submissions even if the development override is set.
 
 ## Real people in videos
 

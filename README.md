@@ -9,11 +9,13 @@ Nuxt 4 serves both the Vue canvas and a Nitro API. Clerk authenticates users, Po
 There are two explicit modes:
 
 - **Demo:** an in-memory design sandbox with sample media and simulated generations.
-- **Live:** authenticated projects, uploads, library, favorites and characters, plus durable BytePlus ModelArk and Voplica generation jobs. Generation stays disabled until server credentials, model access and the worker are configured; the app does not simulate successful results or credit billing in live mode.
+- **Live:** authenticated projects, uploads, library, favorites and characters, plus durable BytePlus ModelArk and Voplica generation jobs and a PostgreSQL-backed token wallet. Generation requires server credentials, model access, verified pricing and the explicit worker; successful generation results are never simulated in live mode. The optional development checkout simulates payment only, and is clearly labeled as a test.
 
 No Encore or separate microservices are required.
 
 The generation adapters and worker are implemented. See [ModelArk setup](docs/modelark-setup.md) and [Voplica / MiniMax setup](docs/voplica-setup.md) for activation, supported models and recovery. Character-video requirements differ by provider.
+
+Tokens are non-transferable Vela usage units: 1 token represents $0.001 of retail usage, with 500 welcome tokens granted once per account. Server-side quotes include output count and applicable image-reference costs. Generation reserves tokens, successful delivery spends them, and confirmed failure or cancellation returns the hold. Real payment processing is not connected; Voplica generation remains blocked pending a verified tariff.
 
 ## Local setup
 
@@ -44,6 +46,8 @@ pnpm dev --host 127.0.0.1 --port 3457
 Open http://127.0.0.1:3457 for the public landing. **Try Vela** opens registration; **Log in** opens sign-in. Both remain inside Vela. `/studio` opens your first saved project or creates an empty one after authentication. Upload a reference and edit its prompt; reloading should restore the saved board. The status beside the project tells you when changes have reached the server.
 
 The homepage is prerendered HTML; workspace routes remain client-rendered and protected by the existing session/API checks. See [landing research and acceptance](docs/landing-research.md) for the design rationale and preview limitations.
+
+To preview purchasing, apply migrations through `007_token_wallet.sql`, set `VELA_DEMO_PAYMENTS_ENABLED=true` in the local server environment, restart the app and open `/billing`. Test purchases persist tokens but charge no money. This checkout is hard-disabled in production. Accounts with test purchases cannot spend on real providers unless the separate development-only `VELA_ALLOW_DEMO_PROVIDER_SPEND=true` override is deliberately enabled; keep it false for ordinary UI testing. See [billing operations](docs/backend-setup.md#tokens-and-test-checkout).
 
 Secrets belong in the ignored `.env` file or the deployment's secret store. Never add them to source control. For an existing Clerk application, the official CLI can pull keys directly to `.env` after `clerk auth login`; do not provision a replacement application.
 

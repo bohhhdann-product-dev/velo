@@ -10,10 +10,11 @@ import { modelArkProvider } from './modelark'
 import { voplicaProvider } from './voplica'
 import { voplicaConfig } from './voplica-config'
 import { ProviderFailure, type GenerationManifest, type GenerationProvider, type ProviderOutput, type ProviderState } from './provider'
+import { assertProviderSpendingAllowed, settleTakeTokens } from '../billing'
 
 type Claim = { id: string; generation_id: string; owner_id: string; status: string; manifest: GenerationManifest;
   provider_task_id: string | null; provider_response: ProviderOutput | null; provider_state: ProviderState;
-  lease_token: string; created_at: Date; output_received_at: Date | null }
+  lease_token: string; created_at: Date; preparation_started_at: Date | null; output_received_at: Date | null }
 const UNKNOWN = 'The provider may have accepted this request. Check its result before starting another generation; it will not be submitted again automatically.'
 async function claimWork(): Promise<Claim | null> {
   const db = getDb()
@@ -41,8 +42,9 @@ async function claimWork(): Promise<Claim | null> {
     if (!row) return null
     const token = randomUUID()
     await tx`UPDATE generation_takes SET status = ${row.status === 'queued' ? 'preparing' : row.status},
+      preparation_started_at = CASE WHEN ${row.status} = 'queued' THEN coalesce(preparation_started_at, now()) ELSE preparation_started_at END,
       lease_token = ${token}, lease_until = now() + interval '5 minutes', updated_at = now() WHERE id = ${row.id}`
-    return { ...row, lease_token: token } as Claim
+    return { ...row, preparation_started_at: row.preparation_started_at ?? new Date(), lease_token: token } as Claim
   }) as Promise<Claim | null>
 }
 async function referenceData(claim: Claim) {
@@ -53,7 +55,9 @@ async function referenceData(claim: Claim) {
     const poster = asset.kind === 'generated_video'
     const key = poster ? asset.preview_key : asset.source_key
     if (!key) fail(400, 'missing_poster', 'This video has no reference frame. Use an image instead.')
-    const bytes = await getStorage().get(key)
+    let bytes: Buffer
+    try { bytes = await getStorage().get(key) }
+    catch { throw new ProviderFailure('transient', 'reference_storage_pending') }
     const metadata = await sharp(bytes, { limitInputPixels: 36_000_000, failOn: 'error' }).metadata()
     const width = metadata.width ?? 0, height = metadata.height ?? 0
     const video = claim.manifest.draft.mode === 'video'
@@ -72,11 +76,14 @@ async function updateClaim(claim: Claim, status: string, errorCode: string | nul
   const db = getDb()
   await db.begin(async tx => {
     await lockOwner(tx, claim.owner_id)
-    await tx`UPDATE generation_takes SET status = ${status}, reserved_bytes = CASE WHEN ${status} = 'failed' THEN 0 ELSE reserved_bytes END, error_code = ${errorCode}, error_message = ${message},
+    const changed = await tx`UPDATE generation_takes SET status = ${status}, reserved_bytes = CASE WHEN ${status} = 'failed' THEN 0 ELSE reserved_bytes END, error_code = ${errorCode}, error_message = ${message},
       lease_token = NULL, lease_until = NULL, next_attempt_at = now() + ${delaySeconds}::int * interval '1 second', updated_at = now()
       WHERE id = ${claim.id} AND lease_token = ${claim.lease_token}
-        AND (${status} <> 'unknown' OR (provider_task_id IS NULL AND provider_response IS NULL))`
-    if (status === 'failed') await retireUnusedVersions(tx, claim.owner_id)
+        AND (${status} <> 'unknown' OR (provider_task_id IS NULL AND provider_response IS NULL)) RETURNING id`
+    if (status === 'failed' && changed.length) {
+      await settleTakeTokens(tx, claim.owner_id, claim.id, 'release')
+      await retireUnusedVersions(tx, claim.owner_id)
+    }
   })
 }
 async function ingest(claim: Claim, output: ProviderOutput) {
@@ -95,6 +102,7 @@ async function ingest(claim: Claim, output: ProviderOutput) {
       const asset = await persistGeneratedMedia(tx, claim.owner_id, `Generated ${output.mode}`, prepared, written)
       await tx`UPDATE generation_takes SET status = 'done', output_asset_id = ${asset.id}, provider_response = NULL,
         lease_token = NULL, lease_until = NULL, error_code = NULL, error_message = NULL, updated_at = now() WHERE id = ${claim.id}`
+      await settleTakeTokens(tx, claim.owner_id, claim.id, 'spend')
       if (!await assetIsUsed(tx, claim.owner_id, asset.id))
         await tx`UPDATE assets SET deleted_at = now() WHERE id = ${asset.id}`
       await retireUnusedVersions(tx, claim.owner_id)
@@ -127,7 +135,7 @@ export async function runGenerationWorkerOnce(injectedProvider?: GenerationProvi
     if (claim.status === 'queued') {
       let references = await referenceData(claim)
       if (provider.prepare) {
-        if (Date.now() - new Date(claim.created_at).getTime() > 3600_000)
+        if (Date.now() - new Date(claim.preparation_started_at!).getTime() > 3600_000)
           throw new ProviderFailure('rejected', 'reference_preparation_expired')
         const prepared = await provider.prepare(claim.manifest, references, { state: claim.provider_state, save: saveProviderState })
         if (!prepared.ready) { await updateClaim(claim, 'queued', null, null, 2); return true }
@@ -137,6 +145,7 @@ export async function runGenerationWorkerOnce(injectedProvider?: GenerationProvi
         await lockOwner(tx, claim.owner_id)
         const [current] = await tx`SELECT id FROM generation_takes WHERE id = ${claim.id} AND lease_token = ${claim.lease_token} AND status = 'preparing' FOR UPDATE`
         if (!current) return false
+        await assertProviderSpendingAllowed(tx, claim.owner_id)
         await assertMediaQuota(tx, claim.owner_id, 0, 0)
         await tx`UPDATE generation_takes SET status = 'submitting', submitted_at = now(), lease_until = now() + interval '5 minutes', updated_at = now() WHERE id = ${claim.id}`
         return true
@@ -186,11 +195,10 @@ export async function runGenerationWorkerOnce(injectedProvider?: GenerationProvi
       await updateClaim(claim, rejected ? 'failed' : 'unknown', rejected ? error.code : 'submission_unknown',
         rejected ? 'The provider rejected this take. Check model access, prompt, and reference requirements.' : UNKNOWN)
     } else if (claim.status === 'running') {
-      const expired = Date.now() - new Date(claim.created_at).getTime() > 7 * 86400_000
-      await updateClaim(claim, expired ? 'failed' : 'running', expired ? 'provider_task_expired' : 'provider_poll_pending',
-        expired ? 'The provider task has expired and will not be resubmitted.' : 'Waiting to reconnect to the provider.', 30)
+      // A transport error cannot prove a paid task failed, regardless of its age.
+      await updateClaim(claim, 'running', 'provider_poll_pending', 'Waiting to reconnect to the provider.', 30)
     } else if (error instanceof ProviderFailure && error.outcome === 'transient'
-      && Date.now() - new Date(claim.created_at).getTime() < 3600_000) {
+      && Date.now() - new Date(claim.preparation_started_at!).getTime() < 3600_000) {
       await updateClaim(claim, 'queued', 'reference_upload_pending', 'Preparing reference images. This take has not been submitted yet.', 30)
     } else {
       await updateClaim(claim, 'failed', error instanceof ProviderFailure ? error.code : 'invalid_input', error && typeof error === 'object' && 'statusMessage' in error

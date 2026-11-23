@@ -16,6 +16,7 @@ import { parseProjectCreate } from '../../server/utils/project-validation'
 import { uploadImage, ownedAsset } from '../../server/services/media'
 import { getStorage } from '../../server/services/storage'
 import { createModelArkMediaFixture, createSyntheticMp4 } from '../fixtures/modelark-media'
+import { createCheckout, confirmCheckout } from '../../server/services/billing'
 
 const databaseUrl = process.env.VELA_TEST_DATABASE_URL
 test('Voplica jobs: immutable Beta7, upload recovery, disable drain, URL refresh, cleanup and uncertain submission', {
@@ -40,6 +41,9 @@ test('Voplica jobs: immutable Beta7, upload recovery, disable drain, URL refresh
     await migrate(process.env.DATABASE_URL)
     const db = getDb(), owner = 'voplica-alice'
     await db`INSERT INTO app_users(id) VALUES (${owner})`
+    process.env.VELA_DEMO_PAYMENTS_ENABLED = process.env.VELA_ALLOW_DEMO_PROVIDER_SPEND = 'true'
+    const checkout = await createCheckout(owner, { packId: 'starter', idempotencyKey: randomUUID() })
+    await confirmCheckout(owner, checkout.id)
     const image = await sharp({ create: { width: 400, height: 400, channels: 3, background: '#98b593' } }).png().toBuffer()
     const source = await uploadImage(owner, image, 'image/png', 'synthetic-reference.png')
     const fixture = await createModelArkMediaFixture(t, { '/video.mp4': createSyntheticMp4() })
@@ -52,11 +56,16 @@ test('Voplica jobs: immutable Beta7, upload recovery, disable drain, URL refresh
     }
     async function queue(existing?: Awaited<ReturnType<typeof project>>) {
       const p = existing ?? await project()
-      return createGeneration(owner, p.id, { generatorId: 'gen', expectedRevision: p.revision, clientMutationId: randomUUID() })
+      // Synthetic fixture tariff: public admission remains blocked until runtime pricing is verified.
+      return createGeneration(owner, p.id, { generatorId: 'gen', expectedRevision: p.revision, clientMutationId: randomUUID() },
+        () => ({ version: 'synthetic-test', perTakeTokens: 100, totalTokens: 100, providerCostUsd: 0.05, retailUsd: 0.1, referenceSurchargeTokens: 0, estimated: true }))
     }
     await assert.rejects(queue(await project('h3-eros-max', 6)), { statusCode: 400, data: { code: 'invalid_duration' } })
     await assert.rejects(queue(await project('h3-eros-max', 5, 'start')), { statusCode: 400, data: { code: 'unsupported_reference_mode' } })
     await assert.rejects(queue(await project('seedance-2-5', 5)), { statusCode: 503, data: { code: 'model_disabled' } })
+    const unpriced = await project()
+    await assert.rejects(createGeneration(owner, unpriced.id, { generatorId: 'gen', expectedRevision: unpriced.revision, clientMutationId: randomUUID() }),
+      { statusCode: 503, data: { code: 'pricing_unavailable' } })
     const accepted = await queue()
     const takeId = accepted.generation.takes[0]!.id
     const [snapshot] = await db`SELECT manifest FROM generations WHERE id = ${accepted.generation.id}`

@@ -46,9 +46,10 @@ s.travel(id, 'past')
 assert.ok(!s.project(id).nodes.some((v) => v.id === n.id))
 s.travel(id, 'future')
 assert.ok(s.project(id).nodes.some((v) => v.id === n.id))
-assert.equal(priceCredits({ ...n.draft, trial: true }), 40)
-for (const m of VIDEO_MODELS)
-  assert.equal(priceCredits({ ...n.draft, modelId: m.value }), m.rates['720p'] * 6 * 2)
+assert.equal(priceCredits({ ...n.draft, trial: true }), 1440)
+const videoTokenTotals = [4854, 3176, 2542, 1588]
+for (const [index, model] of VIDEO_MODELS.entries())
+  assert.equal(priceCredits({ ...n.draft, modelId: model.value }), videoTokenTotals[index])
 s.updateDraft(id, n.id, { durationS: 30 })
 s.updateDraft(id, n.id, { modelId: 'seedance-2-0-mini' })
 assert.equal(s.project(id).nodes.find((v) => v.id === n.id).draft.durationS, 15)
@@ -345,17 +346,11 @@ assert.deepEqual(
 )
 
 // The minimap uses the same world coordinates as the camera, independent of canvas zoom.
-const { fitMinimap, minimapRect, worldToMinimap, minimapToWorld, minimapDefaultVisible } = await import(
+const { fitMinimap, minimapRect, worldToMinimap, minimapToWorld } = await import(
   '../app/entities/studio/minimap.ts'
 )
 const { viewportBounds, centerViewport } = await import('../app/entities/studio/geometry.ts')
 const mapSize = { w: 240, h: 154 }
-// Account for the collapsed sidebar and the canvas/header in the audited mobile viewports.
-for (const pane of [{ w: 242, h: 496 }, { w: 312, h: 772 }, { w: 766, h: 318 }]) {
-  assert.equal(minimapDefaultVisible(pane), false, 'narrow or short canvases start without an obstructing map')
-}
-assert.equal(minimapDefaultVisible({ w: 1180, h: 900 }), true, 'desktop keeps the visible default')
-assert.equal(minimapDefaultVisible({ w: 0, h: 0 }), false, 'wait for the initial pane measurement')
 const close = (actual, expected) =>
   assert.ok(Math.abs(actual - expected) < 1e-7, `${actual} != ${expected}`)
 for (const scale of [0.25, 0.8, 1, 2]) {

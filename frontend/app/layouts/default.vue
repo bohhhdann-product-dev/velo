@@ -13,6 +13,7 @@ import {
 import { toast } from 'vue-sonner'
 import VelaBrand from '~/shared/ui/VelaBrand.vue'
 import AccountProfile from '~/features/workspace/AccountProfile.vue'
+import TokenBalance from '~/features/billing/TokenBalance.vue'
 import { useStudioStore } from '~/stores/studio'
 import { ApiError } from '~/shared/api/workspace'
 const studio = useStudioStore()
@@ -129,6 +130,7 @@ async function removeProject(id: string) {
         </button>
       </div>
       <div class="sidebar-bottom">
+        <TokenBalance />
         <div class="workspace-note sidebar-label">
           <span class="status-dot" />
           {{ studio.live ? 'Your workspace' : 'Demo workspace' }}

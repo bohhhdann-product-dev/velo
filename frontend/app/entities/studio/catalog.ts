@@ -1,4 +1,5 @@
 import type { Aspect, Draft, ImageQuality, Mode, VideoQuality } from './types'
+import { quoteGeneration } from './pricing'
 
 /** Default model per generator type; the video picker exposes the supported catalog. */
 export const MODELS: Record<Mode, { id: string; label: string }> = {
@@ -33,8 +34,6 @@ export const LIVE_VIDEO_MODELS = [
   { value: 'h3-eros-max', label: 'H3 Eros Max · Beta7' },
 ]
 
-/** credits per unit */
-const IMAGE_PRICE: Record<ImageQuality, number> = { '1k': 2, '2k': 4 }
 export const VIDEO_MODELS = [
   { value: 'seedance-2-5', label: 'Seedance 2.5', maxDuration: 30, maxReferences: 15, rates: { '480p': 5, '720p': 8 } },
   { value: 'seedance-2-0', label: 'Seedance 2.0', maxDuration: 15, maxReferences: 9, rates: { '480p': 4, '720p': 6 } },
@@ -45,9 +44,9 @@ export function videoModel(draft: Draft) {
   return VIDEO_MODELS.find(m => m.value === draft.modelId) ?? VIDEO_MODELS[0]!
 }
 
-export function priceCredits(draft: Draft): number {
-  if (draft.mode === 'image') return IMAGE_PRICE[draft.imageQuality] * draft.count
-  return videoModel(draft).rates[draft.trial ? '480p' : draft.videoQuality] * (draft.trial ? 4 : draft.durationS) * draft.count
+/** Legacy name retained for saved demo documents; values are Vela tokens. */
+export function priceCredits(draft: Draft, referenceCount = 0): number {
+  return quoteGeneration(draft, referenceCount)?.totalTokens ?? Infinity
 }
 
 export function defaultDraft(): Draft {

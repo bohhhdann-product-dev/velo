@@ -38,7 +38,6 @@ import {
   type Bounds,
 } from '~/entities/studio/geometry'
 import { useStudioStore } from '~/stores/studio'
-import { minimapDefaultVisible } from '~/entities/studio/minimap'
 
 const props = defineProps<{ projectId: string }>()
 const emit = defineEmits<{
@@ -67,7 +66,6 @@ function nodeRect(node: CanvasNode): Bounds {
 }
 const {
   view,
-  paneSize,
   visibleBounds,
   centerOn,
   center,
@@ -87,11 +85,7 @@ const tool = shallowRef<'select' | 'pan'>('select')
 const spaceDown = shallowRef(false)
 const zoomMenu = shallowRef(false)
 const shortcuts = shallowRef(false)
-const minimapChoice = shallowRef<boolean | null>(null)
-const minimapOpen = computed({
-  get: () => minimapChoice.value ?? minimapDefaultVisible(paneSize),
-  set: (value: boolean) => { minimapChoice.value = value },
-})
+const minimapOpen = shallowRef(false)
 const minimapToggle = ref<HTMLButtonElement | null>(null)
 const minimapId = useId()
 const minimapNodes = computed(() =>

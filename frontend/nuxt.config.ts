@@ -13,6 +13,8 @@ export default defineNuxtConfig({
     '/characters/**': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
     '/library': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
     '/favorites': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/billing': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/billing/**': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
   },
   devtools: { enabled: false },
   modules: [

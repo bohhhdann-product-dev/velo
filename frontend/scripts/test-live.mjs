@@ -156,6 +156,8 @@ globalThis.fetch = originalFetch
 const { createPinia, setActivePinia } = await import('pinia')
 const { useWorkspaceStore } = await import('../app/stores/workspace.ts')
 const { useStudioStore } = await import('../app/stores/studio.ts')
+const { useBillingStore } = await import('../app/stores/billing.ts')
+const fundedWallet = { availableTokens: 50000, totalTokens: 50000, reservedTokens: 0, welcomeTokens: 500, demoCheckoutEnabled: true, tokenUsd: 0.001, packs: [], ledger: [] }
 const { useCharactersStore } = await import('../app/stores/characters.ts')
 setActivePinia(createPinia())
 const workspace = useWorkspaceStore()
@@ -986,6 +988,7 @@ const jobsOwner = useWorkspaceStore()
 jobsOwner.live = true
 jobsOwner.connect('job-owner', async () => 'test-token')
 const jobsStudio = useStudioStore()
+useBillingStore().wallet = structuredClone(fundedWallet)
 const jobProject = {
   id: 'job-project', title: 'Before submit', revision: 1, createdAt: 1,
   nodes: [{ id: 'generator', type: 'generator', x: 10, y: 20, draft: { ...defaultDraft(), prompt: 'A quiet forest', count: 1 } }],
@@ -1003,6 +1006,7 @@ let serverJobProject = structuredClone(jobProject), acceptedProject, fetchedJob 
 const jobPosts = [], jobPuts = []
 const jobStarted = deferred(), acceptJob = deferred()
 globalThis.fetch = async (path, options) => {
+  if (path === '/api/billing') return Response.json(fundedWallet)
   if (options.method === 'PUT') {
     const body = JSON.parse(options.body)
     jobPuts.push(body)
@@ -1084,6 +1088,7 @@ const capabilitiesOwner = useWorkspaceStore()
 capabilitiesOwner.live = true
 capabilitiesOwner.connect('capability-owner', async () => 'test-token')
 const capabilitiesStudio = useStudioStore()
+useBillingStore().wallet = structuredClone(fundedWallet)
 const doneJob = structuredClone(acceptedJob)
 doneJob.takes[0] = { ...doneJob.takes[0], status: 'done', assetId: 'owned-output', url: '/api/assets/owned-output/file' }
 capabilitiesStudio.hydrateLive([structuredClone(jobProject)], [], [doneJob], { ...GENERATION_UNCONFIGURED, enabled: true, reason: null, counts: [1], videoDuration: { min: 4, max: 10, step: 2 } })
@@ -1109,6 +1114,7 @@ assert.equal(capabilitiesStudio.generationBlocked('job-project', 'generator'), '
 
 const staleFavoritePoll = deferred()
 globalThis.fetch = async (_path, options) => {
+  if (_path === '/api/billing') return Response.json(fundedWallet)
   if (options.method === 'PATCH') {
     assert.deepEqual(JSON.parse(options.body), { favorite: true })
     return Response.json({ generation: { ...doneJob, takes: [{ ...doneJob.takes[0], favorite: true, status: 'queued' }] } })
@@ -1232,6 +1238,7 @@ const modelsOwner = useWorkspaceStore()
 modelsOwner.live = true
 modelsOwner.connect('models-owner', async () => 'test-token')
 const modelsStudio = useStudioStore()
+useBillingStore().wallet = structuredClone(fundedWallet)
 const modelProject = structuredClone(jobProject)
 modelProject.nodes[0].draft = { ...defaultDraft(), mode: 'video', modelId: 'seedance-2-5', prompt: 'A character study', durationS: 30, videoQuality: '480p' }
 for (let i = 0; i < 10; i++) {
@@ -1247,7 +1254,7 @@ assert.equal(selectedDraft.durationS, 15)
 assert.equal(selectedDraft.videoQuality, '720p')
 assert.equal(selectedDraft.prompt, 'A character study')
 assert.equal(JSON.stringify(modelsProject.edges), originalInputs, 'model switch cannot discard pinned inputs')
-assert.equal(modelsStudio.generationBlocked('job-project', 'generator'), '')
+assert.match(modelsStudio.generationBlocked('job-project', 'generator'), /Pricing is being confirmed/)
 assert.match(modelsStudio.connectionError('job-project', 'ref-9', 'generator'), /up to 9 references/)
 assert.match(modelsStudio.assetMentionOption('job-project', 'generator', { id: 'extra-asset', kind: 'image', name: 'Extra', handle: 'extra', url: '/api/assets/extra/file' }).disabled, /up to 9 references/)
 assert.equal(modelsStudio.assetMentionOption('job-project', 'generator', { id: 'asset-0', kind: 'character', name: 'Person', handle: 'person', url: '/api/assets/asset-0/file' }).disabled, '')
@@ -1261,7 +1268,7 @@ modelsProject.edges = [{ id: 'start-frame', from: 'ref-1', to: 'generator', slot
 assert.match(modelsStudio.generationBlocked('job-project', 'generator'), /does not support start\/end/)
 assert.match(modelsStudio.connectionError('job-project', 'ref-2', 'generator', 'end'), /does not support start\/end/)
 modelsStudio.updateDraft('job-project', 'generator', { modelId: 'minimax-h3' })
-assert.equal(modelsStudio.generationBlocked('job-project', 'generator'), '')
+assert.match(modelsStudio.generationBlocked('job-project', 'generator'), /Pricing is being confirmed/)
 assert.equal(modelsStudio.connectionError('job-project', 'ref-2', 'generator', 'end'), null)
 assert.deepEqual(modelsProject.edges.map((edge) => edge.id), ['start-frame'], 'switching back restores frame support without recreating inputs')
 modelsStudio.updateDraft('job-project', 'generator', { modelId: 'seedance-2-5' })
@@ -1297,3 +1304,73 @@ modelsStudio.resetPrivate()
 modelsOwner.disconnect()
 globalThis.fetch = originalFetch
 console.log('PASS: separate live model labels, per-model availability/duration/quality/reference/character policies, Eros frame refusal without input loss, compatible character placement and Voplica defaults')
+
+// Token checkout remains server-owned across failed requests, refreshes and account changes.
+setActivePinia(createPinia())
+const billingOwner = useWorkspaceStore()
+billingOwner.live = true
+billingOwner.connect('wallet-owner', async () => 'test-token')
+const tokenWallet = useBillingStore()
+const welcomeWallet = { ...fundedWallet, availableTokens: 500, totalTokens: 500 }
+const paidWallet = { ...welcomeWallet, availableTokens: 10500, totalTokens: 10500 }
+const pendingCheckout = { id: 'checkout-one', packId: 'starter', status: 'pending', tokens: 10000, priceCents: 1000, currency: 'USD', demo: true, createdAt: 1 }
+const checkoutBodies = []
+globalThis.fetch = async (path, options) => {
+  if (path === '/api/billing') return Response.json(welcomeWallet)
+  assert.equal(path, '/api/billing/checkouts')
+  checkoutBodies.push(JSON.parse(options.body))
+  if (checkoutBodies.length === 1) throw new Error('Checkout response lost')
+  return Response.json(pendingCheckout)
+}
+await tokenWallet.refresh()
+assert.equal(tokenWallet.wallet.availableTokens, 500)
+await assert.rejects(tokenWallet.createCheckout('starter'), /Checkout response lost/)
+assert.equal(tokenWallet.wallet.availableTokens, 500, 'starting a failed checkout cannot optimistically credit tokens')
+const checkout = await tokenWallet.createCheckout('starter')
+assert.equal(checkout.id, 'checkout-one')
+assert.deepEqual(checkoutBodies[0], checkoutBodies[1], 'a lost create response reuses the same checkout idempotency key')
+assert.equal(tokenWallet.wallet.availableTokens, 500, 'a created pending checkout does not credit tokens')
+
+const oldWalletStarted = deferred(), oldWalletReleased = deferred()
+globalThis.fetch = async (path) => {
+  if (path === '/api/billing') { oldWalletStarted.resolve(); await oldWalletReleased.promise; return Response.json(welcomeWallet) }
+  assert.equal(path, '/api/billing/checkouts/checkout-one/confirm')
+  return Response.json({ checkout: { ...pendingCheckout, status: 'paid' }, wallet: paidWallet })
+}
+const staleBalance = tokenWallet.refresh()
+await oldWalletStarted.promise
+const confirmedCheckout = await tokenWallet.confirmCheckout(checkout.id)
+assert.equal(confirmedCheckout.status, 'paid')
+assert.equal(tokenWallet.wallet.availableTokens, 10500)
+oldWalletReleased.resolve()
+await staleBalance
+assert.equal(tokenWallet.wallet.availableTokens, 10500, 'a pre-purchase wallet response cannot erase confirmed tokens')
+await tokenWallet.confirmCheckout(checkout.id)
+assert.equal(tokenWallet.wallet.availableTokens, 10500, 'repeated confirmation applies server balance, never adds tokens locally')
+
+const oldConfirmationStarted = deferred(), oldConfirmationReleased = deferred()
+globalThis.fetch = async () => {
+  oldConfirmationStarted.resolve()
+  await oldConfirmationReleased.promise
+  return Response.json({ checkout: { ...pendingCheckout, status: 'paid' }, wallet: paidWallet })
+}
+const oldAccountConfirmation = assert.rejects(tokenWallet.confirmCheckout(checkout.id), /Session changed|aborted/i)
+await oldConfirmationStarted.promise
+billingOwner.connect('different-wallet-owner', async () => 'test-token')
+assert.equal(tokenWallet.wallet, null, 'switching accounts clears all private token state immediately')
+oldConfirmationReleased.resolve()
+await oldAccountConfirmation
+assert.equal(tokenWallet.wallet, null, 'late purchase acknowledgement cannot credit another account')
+
+const oldReadStarted = deferred(), oldReadReleased = deferred()
+globalThis.fetch = async () => { oldReadStarted.resolve(); await oldReadReleased.promise; return Response.json(paidWallet) }
+const oldAccountRead = tokenWallet.refresh()
+await oldReadStarted.promise
+billingOwner.disconnect()
+oldReadReleased.resolve()
+await oldAccountRead
+assert.equal(tokenWallet.wallet, null, 'late wallet reads cannot repopulate a signed-out account')
+assert.equal(tokenWallet.error, '')
+assert.equal(tokenWallet.loading, false)
+globalThis.fetch = originalFetch
+console.log('PASS: token checkout lost-response idempotence, server-only credits, stale-wallet protection, repeated confirmation and account-switch isolation')

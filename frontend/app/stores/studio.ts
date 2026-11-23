@@ -2,6 +2,8 @@ import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
 import { toast } from 'vue-sonner'
 import { useWorkspaceStore } from '~/stores/workspace'
+import { useBillingStore } from '~/stores/billing'
+import { quoteGeneration } from '~/entities/studio/pricing'
 import { useProjectPersistence } from '~/shared/persistence/useProjectPersistence'
 import { projectPayload } from '~/shared/persistence/projectPayload'
 import { requiresReload } from '~/shared/api/workspace'
@@ -48,8 +50,10 @@ const SPAWN_OFFSET = 96
 
 export const useStudioStore = defineStore('studio', () => {
   const workspace = useWorkspaceStore()
+  const billing = useBillingStore()
   const live = computed(() => workspace.live)
   const credits = ref(workspace.live ? 0 : 500)
+  const tokens = computed(() => workspace.live ? billing.wallet?.availableTokens ?? 0 : credits.value)
   const projects = ref<Project[]>([])
   const generations = ref<Generation[]>([])
   const library = ref<LibraryItem[]>([])
@@ -129,6 +133,7 @@ export const useStudioStore = defineStore('studio', () => {
       workspace.assertSession(session)
       if (epoch !== generationEpoch || request !== generationRequest) return
       result.generations.forEach(upsertGeneration)
+      void billing.refresh()
       generationPollError.value = ''
     } catch (cause) {
       if (session !== workspace.sessionVersion || epoch !== generationEpoch || request !== generationRequest) return
@@ -163,7 +168,13 @@ export const useStudioStore = defineStore('studio', () => {
     if (frames.length && references.some((edge) => !edge.slot)) return 'Use reference images or start/end frames, not both.'
     const limit = draft.mode === 'image' ? caps.maxImageReferences : caps.maxVideoReferences
     if (references.filter((edge) => !edge.slot).length > limit) return `Remove extra references (maximum ${limit}).`
-    return promptReferenceError(projectId, generatorId, draft.prompt) || ''
+    const referenceError = promptReferenceError(projectId, generatorId, draft.prompt)
+    if (referenceError) return referenceError
+    const quote = generationQuote(projectId, generatorId)
+    if (!quote) return 'Pricing is being confirmed for this model.'
+    if (!billing.wallet || billing.error) return 'Your token balance is unavailable. Open Tokens to refresh it.'
+    if (quote.totalTokens > tokens.value) return 'Not enough tokens for this generation.'
+    return ''
   }
   async function generateFromNodeAsync(projectId: string, generatorId: string) {
     if (!workspace.live) return generateFromNode(projectId, generatorId)
@@ -182,8 +193,10 @@ export const useStudioStore = defineStore('studio', () => {
       workspace.assertSession(session)
       persistence.hold(projectId)
       held = true
+      const quote = generationQuote(projectId, generatorId)
       const result = await workspace.mutate<{ generation: Generation; project: Project }>(key, `/api/projects/${projectId}/generations`, {
-        method: 'POST', body: { generatorId, expectedRevision: project(projectId)?.revision, clientMutationId: crypto.randomUUID() },
+        method: 'POST', body: { generatorId, expectedRevision: project(projectId)?.revision, clientMutationId: crypto.randomUUID(),
+          expectedPriceTokens: quote?.totalTokens, pricingVersion: quote?.version },
       })
       workspace.assertSession(session)
       upsertGeneration(result.generation)
@@ -199,6 +212,8 @@ export const useStudioStore = defineStore('studio', () => {
       }
       if (held && !retained) persistence.release(projectId)
       throw cause
+    } finally {
+      if (session === workspace.sessionVersion) void billing.refresh()
     }
   }
   async function createProjectAsync(
@@ -269,6 +284,7 @@ export const useStudioStore = defineStore('studio', () => {
     persistence.remove(id)
     deleteProject(id)
     delete history.value[id]
+    if (workspace.live) void billing.refresh()
   }
   async function reloadProject(id: string) {
     await persistence.reload(id)
@@ -951,6 +967,11 @@ export const useStudioStore = defineStore('studio', () => {
       .filter((e) => e.to === generatorId && !e.slot)
       .flatMap((e) => sourceMedia(projectId, e.from) ?? [])
   }
+  function generationQuote(projectId: string, generatorId: string) {
+    const target = project(projectId)
+    const node = target?.nodes.find((item): item is GeneratorNode => item.id === generatorId && item.type === 'generator')
+    return node ? quoteGeneration(node.draft, target!.edges.filter((edge) => edge.to === generatorId).length) : null
+  }
   function activeCount(projectId: string, generatorId: string) {
     return generations.value
       .filter((g) => g.projectId === projectId && g.generatorId === generatorId)
@@ -960,11 +981,12 @@ export const useStudioStore = defineStore('studio', () => {
 
   /* ----------------------------- generation ------------------------------ */
 
-  function finishTake(take: Take, draft: Draft) {
+  function finishTake(take: Take, generation: Generation) {
+    const draft = generation.draft
     if (Math.random() < FAIL_RATE) {
       take.status = 'failed'
-      take.errorMessage = 'The model could not finish this take. Credits refunded.'
-      credits.value += priceCredits({ ...draft, count: 1 })
+      take.errorMessage = 'The model could not finish this take. Tokens returned.'
+      credits.value += (generation.priceTokens ?? generation.priceCredits ?? 0) / generation.draft.count
       return
     }
     if (draft.mode === 'image') {
@@ -991,7 +1013,7 @@ export const useStudioStore = defineStore('studio', () => {
         take.status = 'running'
         setTimeout(() => {
           if (take.status !== 'running') return
-          finishTake(take, generation.draft)
+          finishTake(take, generation)
         }, renderTime)
       }, startDelay)
     }
@@ -1030,9 +1052,11 @@ export const useStudioStore = defineStore('studio', () => {
         ok: false,
         error: `This model supports up to ${limit} references. Remove extra references first.`,
       }
-    const price = priceCredits(generator.draft)
+    const quote = generationQuote(projectId, generatorId)
+    if (!quote) return { ok: false, error: 'Pricing is being confirmed for this model.' }
+    const price = quote.totalTokens
     if (price > credits.value)
-      return { ok: false, error: 'Not enough credits for this generation.' }
+      return { ok: false, error: 'Not enough tokens for this generation.' }
 
     if (
       target.edges.some((e) => e.to === generatorId && e.slot === 'end') &&
@@ -1056,6 +1080,7 @@ export const useStudioStore = defineStore('studio', () => {
           : {}),
       },
       priceCredits: price,
+      priceTokens: price,
       takes: Array.from({ length: generator.draft.count }, () => ({
         id: makeId('take'),
         generationId,
@@ -1111,7 +1136,7 @@ export const useStudioStore = defineStore('studio', () => {
     const found = findTake(takeId)
     if (!found || found.take.status !== 'failed') return false
     const { take, generation } = found
-    const perTake = priceCredits({ ...generation.draft, count: 1 })
+    const perTake = (generation.priceTokens ?? generation.priceCredits ?? 0) / generation.draft.count
     if (perTake > credits.value) return false
     credits.value -= perTake
     take.status = 'queued'
@@ -1318,6 +1343,8 @@ export const useStudioStore = defineStore('studio', () => {
     addReferenceNode,
     addGeneratorNode,
     connectedReferences,
+    generationQuote,
+    tokens,
     generateFromNode,
     retryTake,
     toggleFavorite,

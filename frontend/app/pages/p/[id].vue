@@ -146,7 +146,7 @@ function openTake(takeId: string) {
       <div class="project-header-actions">
         <ProjectSaveStatus v-if="studio.live" :id="project.id" />
         <span v-else class="credit-balance"
-          ><Zap class="size-3.5" />{{ studio.credits }}<span>credits</span></span
+          ><Zap class="size-3.5" />{{ studio.tokens }}<span>tokens</span></span
         >
       </div>
     </header>

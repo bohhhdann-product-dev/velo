@@ -11,7 +11,7 @@ export function requiresReload(cause: unknown) {
   const error = cause as { status?: number; code?: string }
   return (
     error?.status === 410 ||
-    ['revision_conflict', 'stale_character_revision', 'receipt_expired'].includes(error?.code ?? '')
+    ['revision_conflict', 'stale_character_revision', 'receipt_expired', 'price_changed'].includes(error?.code ?? '')
   )
 }
 export function isDefinitiveRejection(cause: unknown) {

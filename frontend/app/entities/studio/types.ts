@@ -39,6 +39,7 @@ export interface Generation {
   createdAt: number
   draft: Draft
   priceCredits: number | null
+  priceTokens?: number | null
   generatorId?: string
   takes: Take[]
 }

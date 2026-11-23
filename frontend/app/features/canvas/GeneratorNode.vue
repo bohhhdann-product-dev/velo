@@ -15,12 +15,13 @@ import {
   VIDEO_MODELS,
   videoModel,
   VIDEO_QUALITIES,
-  priceCredits,
 } from '~/entities/studio/catalog'
 import { GENERATOR_W, clampScale, inPort, outPort } from '~/entities/studio/geometry'
 import { useStudioStore } from '~/stores/studio'
 import { capabilitiesForModel } from '~/entities/studio/generation'
 import { toast } from 'vue-sonner'
+import { useBillingStore } from '~/stores/billing'
+import { formatTokens } from '~/entities/billing/types'
 
 const props = defineProps<{
   node: GeneratorNode
@@ -37,6 +38,7 @@ const emit = defineEmits<{
 }>()
 
 const studio = useStudioStore()
+const billing = useBillingStore()
 const capabilities = computed(() => capabilitiesForModel(studio.generationCapabilities, props.node.draft))
 const submission = computed(() => studio.generationSubmissions[props.node.id])
 async function reloadCanvas() {
@@ -107,7 +109,9 @@ const countOptions = computed(() => (studio.live ? capabilities.value.counts : C
 
 const references = computed(() => studio.connectedReferences(props.projectId, props.node.id))
 
-const price = computed(() => priceCredits(props.node.draft))
+const quote = computed(() => studio.generationQuote(props.projectId, props.node.id))
+const price = computed(() => quote.value?.totalTokens ?? null)
+const insufficientTokens = computed(() => price.value !== null && (!studio.live || billing.wallet) && price.value > studio.tokens)
 
 const activeTakes = computed(() => studio.activeCount(props.projectId, props.node.id))
 const hasFrames = computed(() => Boolean(frame('start') || frame('end')))
@@ -133,7 +137,8 @@ const blocked = computed(() => {
     promptText.value,
   )
   if (mentionError) return mentionError
-  if (price.value > studio.credits) return 'Not enough credits'
+  if (price.value === null) return 'Pricing is being confirmed for this model.'
+  if (insufficientTokens.value) return 'Not enough tokens'
   return ''
 })
 
@@ -305,6 +310,13 @@ function disconnectReference(referenceId: string) {
         Trial<span :class="{ on: node.draft.trial }"><i /></span>
       </button>
     </div>
+    <div class="generation-price" @pointerdown.stop>
+      <div><span>{{ node.draft.count }} {{ node.draft.count === 1 ? 'output' : 'outputs' }}</span><strong>{{ price === null ? 'Pricing pending' : `${formatTokens(price)} tokens` }}</strong></div>
+      <p v-if="quote?.referenceSurchargeTokens">Includes {{ formatTokens(quote.referenceSurchargeTokens * node.draft.count) }} tokens for additional references.</p>
+      <p v-else-if="quote && (references.length || hasFrames)">{{ node.draft.mode === 'image' ? 'First reference included.' : 'Image references included.' }}</p>
+      <NuxtLink v-if="insufficientTokens && studio.live" to="/billing" class="generation-buy">You need {{ formatTokens(price! - studio.tokens) }} more tokens · Buy tokens</NuxtLink>
+      <p v-if="!quote">This model will be available once its price is confirmed.</p>
+    </div>
     <div class="generator-footer" @pointerdown.stop>
       <span class="generation-note" :title="blocked || undefined"
         ><span v-if="activeTakes" class="busy-dot" />{{
@@ -318,9 +330,6 @@ function disconnectReference(referenceId: string) {
         @click.stop="run"
       >
         <Play class="size-3.5" /> {{ submission?.status === 'unconfirmed' ? 'Check request' : submission?.status === 'submitting' ? 'Submitting…' : activeTakes ? 'Creating…' : 'Generate' }}
-        <span v-if="!studio.live"
-          >{{ price }} <span class="font-normal opacity-70">cr</span></span
-        >
       </button>
       <button v-if="submission?.status === 'expired'" class="text-xs underline" @click="reloadCanvas">Reload saved canvas</button>
     </div>
@@ -356,3 +365,12 @@ function disconnectReference(referenceId: string) {
     </template>
   </NodeFrame>
 </template>
+
+<style scoped>
+.generation-price { padding: 12px 16px; border-top: 1px solid var(--line); }
+.generation-price > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; }
+.generation-price > div > span { color: var(--ink-2); }
+.generation-price strong { font-weight: 500; font-variant-numeric: tabular-nums; }
+.generation-price p { color: var(--ink-2); font-size: 11px; line-height: 1.5; margin: 6px 0 0; }
+.generation-buy { display: block; color: var(--accent); text-decoration: underline; text-underline-offset: 3px; font-size: 12px; margin-top: 8px; line-height: 1.5; }
+</style>

@@ -2,6 +2,9 @@
 import { ArrowUpRight, Plus, Check } from 'lucide-vue-next'
 import VelaBrand from '~/shared/ui/VelaBrand.vue'
 import StudioWalkthrough from '~/features/marketing/StudioWalkthrough.vue'
+import { defaultDraft } from '~/entities/studio/catalog'
+import { quoteGeneration } from '~/entities/studio/pricing'
+import { formatTokens } from '~/entities/billing/types'
 definePageMeta({ layout: 'marketing' })
 useSeoMeta({
   title: 'Vela — SFW video studio for Reels, Stories and Shorts',
@@ -28,10 +31,12 @@ const frames = [
   },
 ]
 const currentFrame = computed(() => frames[frame.value]!)
+const imageTokens = quoteGeneration({ ...defaultDraft(), count: 1 })!.totalTokens
+const videoTokens = quoteGeneration({ ...defaultDraft(), mode: 'video', modelId: 'seedance-2-5', durationS: 5, videoQuality: '720p', count: 1 })!.totalTokens
 const questions = [
   {
     title: 'What can I try today?',
-    text: 'You can upload photos, build a character for each creator, and plan scenes on a canvas. Image and video generation are not available yet. The preview does not collect payment.',
+    text: 'You can upload photos, build a character for each creator, and plan scenes on a canvas. Image and video generation are not available yet. The preview includes a test token checkout; no money is charged.',
   },
   {
     title: 'Which formats is Vela for?',
@@ -43,7 +48,7 @@ const questions = [
   },
   {
     title: 'Which video models are planned?',
-    text: 'Seedance and MiniMax are planned for the video workflow. Generation is still being connected, so the preview currently lets you prepare characters and scenes. Available models and their rates will be confirmed at launch.',
+    text: 'Seedance and MiniMax are planned for the video workflow. Generation is still being connected, so the preview currently lets you prepare characters and scenes. Seedance estimates are shown below; MiniMax pricing is still being confirmed.',
   },
   {
     title: 'Who can see my projects?',
@@ -140,16 +145,17 @@ const questions = [
       </section>
       <section id="pricing" class="production-section public-wrap" aria-labelledby="pricing-heading">
         <div>
-          <h2 id="pricing-heading">Models and credit pricing</h2>
-          <p>Choose the model and settings that fit the clip you have in mind. We’re preparing Seedance and MiniMax for the video workflow.</p>
+          <h2 id="pricing-heading">Tokens for what you create.</h2>
+          <p>Buy a pack when you need it. Each generator shows its token price before you start, including additional image references.</p>
         </div>
         <div>
           <dl class="production-details">
-            <div><dt>Video models</dt><dd><span translate="no">Seedance · MiniMax</span><small>Planned for launch</small></dd></div>
-            <div><dt>Price per credit</dt><dd>$X</dd></div>
-            <div><dt>Example video cost</dt><dd>Y credits</dd></div>
+            <div><dt>Token packs</dt><dd>10,000 / $10<small>25,000 / $25 · 50,000 / $50</small></dd></div>
+            <div><dt>Seedream 5 Pro image</dt><dd>{{ formatTokens(imageTokens) }} tokens<small>1K · one image · up to one reference</small></dd></div>
+            <div><dt>Seedance 2.5 video</dt><dd>{{ formatTokens(videoTokens) }} tokens<small>5 seconds · 720p · one video</small></dd></div>
           </dl>
-          <p class="pricing-note">X and Y are placeholders. Final pricing will depend on the model, video length and quality.</p>
+          <p class="pricing-note">1,000 tokens = $1. New accounts receive 500 welcome tokens. Generation is still paused; the local checkout simulates purchases without charging money. MiniMax pricing is being confirmed.</p>
+          <NuxtLink to="/billing" class="public-link">View token packs <ArrowUpRight aria-hidden="true" /></NuxtLink>
         </div>
       </section>
       <section id="questions" class="questions-section public-wrap" aria-labelledby="questions-heading">

@@ -15,8 +15,11 @@ import { capabilitiesForModel } from '../../app/entities/studio/generation'
 import { VOPLICA_MODELS, voplicaConfig } from './generation/voplica-config'
 import { generatedMediaReservation } from './generated-media'
 import type { GenerationManifest, GenerationReference } from './generation/provider'
+import { quoteGeneration } from '../../app/entities/studio/pricing'
+import { reserveTakeTokens } from './billing'
 
-const requestSchema = z.object({ generatorId: idSchema, expectedRevision: z.number().int().positive(), clientMutationId: idSchema }).strict()
+const requestSchema = z.object({ generatorId: idSchema, expectedRevision: z.number().int().positive(), clientMutationId: idSchema,
+  expectedPriceTokens: z.number().int().positive().optional(), pricingVersion: z.string().max(100).optional() }).strict()
 const ACTIVE = ['queued', 'preparing', 'submitting', 'running', 'ingesting', 'unknown']
 export async function generationDto(db: Db, ownerId: string, id: string) {
   const [generation] = await db`SELECT * FROM generations WHERE id::text = ${id} AND owner_id = ${ownerId}`
@@ -25,12 +28,13 @@ export async function generationDto(db: Db, ownerId: string, id: string) {
     WHERE t.generation_id = ${generation.id} ORDER BY t.created_at, t.id`
   return { id: generation.id as string, projectId: generation.project_id as string, generatorId: generation.generator_id as string,
     createdAt: new Date(generation.created_at).getTime(), draft: generation.draft as Draft, priceCredits: null,
+    priceTokens: generation.token_quote?.totalTokens ?? null, billingQuote: generation.token_quote ?? null,
     takes: takes.map(take => ({ id: take.id as string, generationId: generation.id as string,
       status: ['preparing', 'submitting', 'ingesting'].includes(take.status) ? 'running' : take.status,
       assetId: take.output_asset_id as string | null,
       url: take.output_asset_id ? assetUrl(take.output_asset_id, 'source') : null,
       posterUrl: take.output_asset_id && generation.draft.mode === 'video' && take.preview_key ? assetUrl(take.output_asset_id) : null,
-      favorite: Boolean(take.favorite), ...(take.error_message ? { errorMessage: take.error_message as string } : {}) })) }
+      priceTokens: Number(take.price_tokens), favorite: Boolean(take.favorite), ...(take.error_message ? { errorMessage: take.error_message as string } : {}) })) }
 }
 export async function listGenerations(ownerId: string) {
   const db = getDb()
@@ -38,14 +42,14 @@ export async function listGenerations(ownerId: string) {
   return Promise.all(rows.map(row => generationDto(db, ownerId, row.id)))
 }
 
-async function manifestFor(tx: postgres.TransactionSql, ownerId: string, board: ProjectBoard, generator: GeneratorNode): Promise<GenerationManifest> {
+async function manifestFor(tx: postgres.TransactionSql, ownerId: string, board: ProjectBoard, generator: GeneratorNode, allowDisabled = false): Promise<GenerationManifest> {
   const config = generationConfig()
   const draft = structuredClone(generator.draft)
   const catalog = generationCapabilities()
   const capabilities = capabilitiesForModel(catalog, draft)
   if (draft.trial || (draft.mode === 'image' ? draft.modelId !== catalog.imageModel : !catalog.videoModels.includes(draft.modelId)))
     fail(400, 'unsupported_model', 'Choose a connected model. Draft mode is not supported yet.')
-  if (!capabilities.enabled) fail(503, 'model_disabled', capabilities.reason ?? 'This model is not connected yet.')
+  if (!allowDisabled && !capabilities.enabled) fail(503, 'model_disabled', capabilities.reason ?? 'This model is not connected yet.')
   const voplicaModel = VOPLICA_MODELS[draft.modelId as keyof typeof VOPLICA_MODELS]
   if (draft.mode === 'video') {
     const { min, max, step } = capabilities.videoDuration
@@ -91,11 +95,30 @@ async function manifestFor(tx: postgres.TransactionSql, ownerId: string, board: 
     providerModel: voplicaModel ? voplicaModel.variant : draft.mode === 'image' ? config.imageModel : config.videoModel,
     ...(voplicaModel ? { providerWorkflow: voplicaConfig().workflow } : {}) }
 }
-export async function createGeneration(ownerId: string, projectId: string, input: unknown) {
+export async function quoteSavedGeneration(ownerId: string, projectId: string, input: unknown) {
+  const parsed = requestSchema.pick({ generatorId: true, expectedRevision: true }).safeParse(input)
+  if (!parsed.success) fail(400, 'invalid_generation', 'A saved generator and its revision are required.')
+  return getDb().begin(async tx => {
+    await lockOwner(tx, ownerId)
+    const [row] = await tx<ProjectRow[]>`SELECT * FROM projects WHERE id = ${projectId} AND owner_id = ${ownerId} AND deleted_at IS NULL`
+    if (!row) fail(404, 'not_found', 'Project not found')
+    if (row.revision !== parsed.data.expectedRevision) fail(409, 'revision_conflict', 'Save the latest project before requesting a quote.')
+    const generator = row.board.nodes.find(node => node.id === parsed.data.generatorId && node.type === 'generator') as GeneratorNode | undefined
+    if (!generator) fail(404, 'not_found', 'Generator not found')
+    await validateProjectReferences(tx, ownerId, row.board.nodes)
+    const manifest = await manifestFor(tx, ownerId, row.board, generator, true)
+    const quote = quoteGeneration(manifest.draft, manifest.references.length)
+    if (!quote) fail(503, 'pricing_unavailable', 'Verified pricing is not available for this model yet.')
+    return { quote, revision: row.revision }
+  })
+}
+export async function createGeneration(ownerId: string, projectId: string, input: unknown, priceQuote = quoteGeneration) {
   const parsed = requestSchema.safeParse(input)
   if (!parsed.success) fail(400, 'invalid_generation', 'A saved generator, revision, and unique request ID are required.')
   const value = parsed.data
-  const fingerprint = createHash('sha256').update(JSON.stringify([projectId, value.generatorId, value.expectedRevision])).digest('hex')
+  const fingerprint = createHash('sha256').update(JSON.stringify([projectId, value.generatorId, value.expectedRevision,
+    ...(value.expectedPriceTokens !== undefined || value.pricingVersion !== undefined
+      ? [value.expectedPriceTokens ?? null, value.pricingVersion ?? null] : [])])).digest('hex')
   const accepted = await getDb().begin(async tx => {
     await lockOwner(tx, ownerId)
     const scope = `projects:${projectId}:generate`
@@ -122,17 +145,23 @@ export async function createGeneration(ownerId: string, projectId: string, input
     if (running) fail(409, 'generation_active', 'This generator already has an active or unconfirmed generation.')
     await validateProjectReferences(tx, ownerId, row.board.nodes)
     const manifest = await manifestFor(tx, ownerId, row.board, generator)
+    const quote = priceQuote(manifest.draft, manifest.references.length)
+    if (!quote) fail(503, 'pricing_unavailable', 'Verified pricing is not available for this model yet.')
+    if ((value.expectedPriceTokens !== undefined && value.expectedPriceTokens !== quote.totalTokens)
+      || (value.pricingVersion !== undefined && value.pricingVersion !== quote.version))
+      fail(409, 'price_changed', 'The generation price changed. Review the updated quote before generating.')
     const reservedBytes = generatedMediaReservation(manifest.draft.mode)
     await assertMediaQuota(tx, ownerId, reservedBytes * generator.draft.count, generator.draft.count)
     const generationId = randomUUID()
-    await tx`INSERT INTO generations(id, owner_id, project_id, generator_id, draft, manifest)
-      VALUES (${generationId}, ${ownerId}, ${projectId}, ${generator.id}, ${tx.json(manifest.draft as unknown as postgres.JSONValue)}, ${tx.json(manifest as unknown as postgres.JSONValue)})`
+    await tx`INSERT INTO generations(id, owner_id, project_id, generator_id, draft, manifest, token_quote)
+      VALUES (${generationId}, ${ownerId}, ${projectId}, ${generator.id}, ${tx.json(manifest.draft as unknown as postgres.JSONValue)}, ${tx.json(manifest as unknown as postgres.JSONValue)}, ${tx.json(quote as unknown as postgres.JSONValue)})`
     const board = structuredClone(row.board)
     const size = takeBodySize(generator.draft.aspect)
     let x = Math.max(generator.x + nodeSize(generator).w + 80, ...board.nodes.filter(node => node.type === 'take').map(node => node.x + 380))
     for (let index = 0; index < generator.draft.count; index++) {
       const id = randomUUID()
       await tx`INSERT INTO generation_takes(id, generation_id, reserved_bytes) VALUES (${id}, ${generationId}, ${reservedBytes})`
+      await reserveTakeTokens(tx, ownerId, id, quote.perTakeTokens)
       board.nodes.push({ id: `take_${id}`, type: 'take', takeId: id, generationId, x, y: generator.y })
       board.edges.push({ id: `output_${id}`, from: generator.id, to: `take_${id}` })
       x += size.w + 40
