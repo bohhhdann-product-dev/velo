@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm, utimes } from 'node:fs/promises'
+import { mkdtemp, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -17,6 +17,7 @@ import { createCharacter, getCharacter, updateCharacter, approveCharacter, build
 import { validateProjectReferences, hydrateProjectReferences } from '../../server/services/project-media'
 import { getStorage } from '../../server/services/storage'
 import { deleteProject } from '../../server/services/projects'
+import { migrate } from '../../scripts/migrate.mjs'
 
 const databaseUrl = process.env.VELA_TEST_DATABASE_URL
 test('private media and character lifecycle against PostgreSQL', {
@@ -42,10 +43,8 @@ test('private media and character lifecycle against PostgreSQL', {
     process.env.VELA_LOCAL_AUTH_TOKEN = 'local-media-test-token-1234567890'
     process.env.VELA_LOCAL_USER_ID = 'alice'
     process.env.NODE_ENV = 'test'
+    await migrate(process.env.DATABASE_URL)
     const db = getDb()
-    for (const file of ['001_foundation.sql', '002_media.sql', '003_project_tombstones.sql', '004_review_hardening.sql', '005_generation_jobs.sql']) {
-      await db.unsafe(await readFile(new URL(`../../server/db/migrations/${file}`, import.meta.url), 'utf8'))
-    }
     await db`INSERT INTO app_users (id) VALUES ('alice'), ('bob')`
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const address = server.address() as { port: number }

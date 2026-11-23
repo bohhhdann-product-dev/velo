@@ -16,6 +16,7 @@
     "media:cleanup": "node --env-file-if-exists=.env --import tsx scripts/cleanup-media.ts",
     "generation:worker": "node --env-file-if-exists=.env --import tsx scripts/generation-worker.ts",
     "test:live": "node scripts/test-live.mjs",
+    "test:admin": "node scripts/test-admin-client.mjs",
     "voplica:check": "node --env-file-if-exists=.env --import tsx scripts/voplica-check.ts"
   },
   "dependencies": {

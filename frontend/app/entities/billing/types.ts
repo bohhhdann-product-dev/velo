@@ -6,6 +6,9 @@ export interface TokenPack {
 }
 
 export interface TokenWallet {
+  discountPercent: number
+  nsfwEnabled: boolean
+  isAdmin: boolean
   availableTokens: number
   reservedTokens: number
   totalTokens: number

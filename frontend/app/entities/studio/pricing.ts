@@ -7,6 +7,7 @@ export const MARKUP_PERCENT = 75
 
 export interface GenerationQuote {
   version: string
+  discountPercent?: number
   perTakeTokens: number
   totalTokens: number
   providerCostUsd: number
@@ -35,8 +36,9 @@ const pricedTokens = (microUsd: number) => Math.ceil(microUsd * (100 + MARKUP_PE
  * Seedance uses the published 480p/720p pixel-budget estimate. Retail is fixed at
  * admission; actual provider token variance is a Vela cost, never a hidden debit.
  */
-export function quoteGeneration(draft: Draft, referenceCount = 0): GenerationQuote | null {
+export function quoteGeneration(draft: Draft, referenceCount = 0, discountPercent = 0): GenerationQuote | null {
   if (!Number.isSafeInteger(referenceCount) || referenceCount < 0 || referenceCount > 15
+    || !Number.isSafeInteger(discountPercent) || discountPercent < 0 || discountPercent > 100
     || !Number.isSafeInteger(draft.count) || draft.count < 1 || draft.count > 4) return null
   let costMicros: number
   let baseMicros: number
@@ -59,11 +61,13 @@ export function quoteGeneration(draft: Draft, referenceCount = 0): GenerationQuo
     baseMicros = costMicros = Math.round(tokensPerSecond * duration * rate)
     estimated = true
   } else return null
-  const perTakeTokens = pricedTokens(costMicros)
+  const discountedTokens = (micros: number) => Math.ceil(pricedTokens(micros) * (100 - discountPercent) / 100)
+  const perTakeTokens = discountedTokens(costMicros)
   return {
-    version: PRICING_VERSION, perTakeTokens, totalTokens: perTakeTokens * draft.count,
+    version: discountPercent ? `${PRICING_VERSION}:d${discountPercent}` : PRICING_VERSION,
+    discountPercent, perTakeTokens, totalTokens: perTakeTokens * draft.count,
     providerCostUsd: costMicros * draft.count / 1_000_000,
     retailUsd: perTakeTokens * draft.count * BILLING_TOKEN_USD,
-    referenceSurchargeTokens: perTakeTokens - pricedTokens(baseMicros), estimated,
+    referenceSurchargeTokens: perTakeTokens - discountedTokens(baseMicros), estimated,
   }
 }

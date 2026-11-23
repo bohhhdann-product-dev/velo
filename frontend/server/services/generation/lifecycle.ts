@@ -2,6 +2,18 @@ import type postgres from 'postgres'
 import { assetIsUsed, retireUnusedVersions } from '../media'
 import { settleTakeTokens } from '../billing'
 
+/** Caller holds the owner lock. In-flight paid requests must finish normally. */
+export async function cancelUnsubmittedForAccount(tx: postgres.TransactionSql, ownerId: string, reason: 'account_blocked' | 'nsfw_disabled') {
+  const cancelled = await tx`UPDATE generation_takes t SET status = 'failed', reserved_bytes = 0,
+    error_code = ${reason}, error_message = ${reason === 'account_blocked' ? 'This account is blocked.' : '18+ model access was disabled.'},
+    lease_token = NULL, lease_until = NULL, updated_at = now()
+    FROM generations g WHERE t.generation_id = g.id AND g.owner_id = ${ownerId}
+      AND t.status IN ('queued', 'preparing')
+      AND (${reason} = 'account_blocked' OR g.manifest->'draft'->>'modelId' = 'h3-eros-max') RETURNING t.id`
+  for (const take of cancelled) await settleTakeTokens(tx, ownerId, take.id, 'release')
+  await retireUnusedVersions(tx, ownerId)
+}
+
 /** Deleted projects retire results only after copied canvas pins disappear. */
 export async function retireUnusedGenerations(tx: postgres.TransactionSql, ownerId: string) {
   const retired = await tx`UPDATE generations g SET deleted_at = now() WHERE g.owner_id = ${ownerId} AND g.deleted_at IS NULL

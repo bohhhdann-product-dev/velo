@@ -2,6 +2,7 @@ import { timingSafeEqual } from 'node:crypto'
 import { createClerkClient } from '@clerk/backend'
 import { createError, getHeader, getHeaders, getRequestURL, setHeader, type H3Event } from 'h3'
 import { getDb } from './db'
+import { assertAccountActive, isAdminUser } from '../services/account-policy'
 
 const writes = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 const loopbackHosts = new Set(['localhost', '127.0.0.1', '[::1]', '::1'])
@@ -89,5 +90,13 @@ export async function requireUser(event: H3Event): Promise<{ id: string }> {
     }
   }
   await getDb()`INSERT INTO app_users (id) VALUES (${id}) ON CONFLICT (id) DO NOTHING`
+  await assertAccountActive(getDb(), id)
   return { id }
+}
+
+export async function requireAdmin(event: H3Event): Promise<{ id: string }> {
+  const user = await requireUser(event)
+  if (!isAdminUser(user.id))
+    throw createError({ statusCode: 403, statusMessage: 'Administrator access is required', data: { code: 'not_admin' } })
+  return user
 }

@@ -57,7 +57,17 @@ export const useStudioStore = defineStore('studio', () => {
   const projects = ref<Project[]>([])
   const generations = ref<Generation[]>([])
   const library = ref<LibraryItem[]>([])
-  const generationCapabilities = ref<GenerationCapabilities>({ ...GENERATION_UNCONFIGURED })
+  const providerCapabilities = ref<GenerationCapabilities>({ ...GENERATION_UNCONFIGURED })
+  const generationCapabilities = computed({
+    get(): GenerationCapabilities {
+      const caps = providerCapabilities.value
+      if (!workspace.live || billing.wallet?.nsfwEnabled) return caps
+      return { ...caps, modelSettings: { ...caps.modelSettings,
+        'h3-eros-max': { ...caps.modelSettings?.['h3-eros-max'], enabled: false,
+          reason: '18+ model access is not enabled for your account.' } } }
+    },
+    set(value: GenerationCapabilities) { providerCapabilities.value = value },
+  })
   function generatorDraft(mode?: Mode): Draft {
     if (!workspace.live) return { ...defaultDraft(), mode: mode ?? 'image', modelId: mode === 'video' ? 'seedance-2-5' : 'seedream-5-pro' }
     const caps = generationCapabilities.value
@@ -146,6 +156,7 @@ export const useStudioStore = defineStore('studio', () => {
     const node = target?.nodes.find((item): item is GeneratorNode => item.id === generatorId && item.type === 'generator')
     if (!node || !target) return 'Generator not found.'
     const draft = node.draft, caps = capabilitiesForModel(generationCapabilities.value, draft)
+    if (draft.modelId === 'h3-eros-max' && !billing.wallet?.nsfwEnabled) return '18+ model access is not enabled for your account.'
     const references = target.edges.filter((edge) => edge.to === generatorId)
     if (draft.mode === 'video' && references.some((edge) => target.nodes.some((item) => item.id === edge.from && item.type === 'reference' && item.assetKind === 'character')) && !caps.characterVideo)
       return CHARACTER_VIDEO_REASON
@@ -970,7 +981,8 @@ export const useStudioStore = defineStore('studio', () => {
   function generationQuote(projectId: string, generatorId: string) {
     const target = project(projectId)
     const node = target?.nodes.find((item): item is GeneratorNode => item.id === generatorId && item.type === 'generator')
-    return node ? quoteGeneration(node.draft, target!.edges.filter((edge) => edge.to === generatorId).length) : null
+    return node ? quoteGeneration(node.draft, target!.edges.filter((edge) => edge.to === generatorId).length,
+      workspace.live ? billing.wallet?.discountPercent ?? 0 : 0) : null
   }
   function activeCount(projectId: string, generatorId: string) {
     return generations.value

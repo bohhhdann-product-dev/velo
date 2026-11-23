@@ -3,6 +3,7 @@ import type postgres from 'postgres'
 import { z } from 'zod'
 import { getDb } from '../utils/db'
 import { fail, lockOwner, type Db } from './media'
+import { assertAccountActive, getAccountPolicy, isAdminUser } from './account-policy'
 
 export const WELCOME_TOKENS = 500
 export const TOKEN_PACKS = [
@@ -31,7 +32,9 @@ async function balances(db: Db, ownerId: string) {
 async function walletDto(db: Db, ownerId: string) {
   const ledger = await db`SELECT id, kind, amount, label, created_at FROM token_ledger
     WHERE owner_id = ${ownerId} ORDER BY created_at DESC, id DESC LIMIT 100`
+  const policy = await getAccountPolicy(db, ownerId)
   return { ...await balances(db, ownerId), welcomeTokens: WELCOME_TOKENS,
+    discountPercent: policy.discountPercent, nsfwEnabled: policy.nsfwEnabled, isAdmin: isAdminUser(ownerId),
     demoCheckoutEnabled: demoCheckoutEnabled(), tokenUsd: 0.001, packs: TOKEN_PACKS,
     ledger: ledger.map(row => ({ id: row.id as string, kind: row.kind as string, amount: Number(row.amount),
       label: row.label as string, createdAt: new Date(row.created_at).getTime() })) }
@@ -39,6 +42,7 @@ async function walletDto(db: Db, ownerId: string) {
 export async function getWallet(ownerId: string) {
   return getDb().begin(async tx => {
     await lockOwner(tx, ownerId)
+    await assertAccountActive(tx, ownerId)
     await ensureWelcome(tx, ownerId)
     return walletDto(tx, ownerId)
   })
@@ -47,7 +51,7 @@ const checkoutInput = z.object({ packId: z.string(), idempotencyKey: z.string().
 const checkoutId = z.string().uuid()
 function checkoutDto(row: Record<string, any>) {
   return { id: row.id as string, status: row.status as 'pending' | 'paid', packId: row.pack_id as string,
-    tokens: Number(row.tokens), priceCents: Number(row.price_cents), currency: 'USD' as const, demo: true,
+    tokens: Number(row.tokens), priceCents: Number(row.price_cents), currency: 'USD' as const, demo: row.payment_mode === 'test',
     createdAt: new Date(row.created_at).getTime() }
 }
 async function ownedCheckout(db: Db, ownerId: string, id: string) {
@@ -65,6 +69,7 @@ export async function createCheckout(ownerId: string, input: unknown) {
   if (!pack) fail(400, 'invalid_pack', 'This token pack is unavailable.')
   return getDb().begin(async tx => {
     await lockOwner(tx, ownerId)
+    await assertAccountActive(tx, ownerId)
     await ensureWelcome(tx, ownerId)
     const [existing] = await tx`SELECT * FROM token_checkouts WHERE owner_id = ${ownerId} AND idempotency_key = ${idempotencyKey}`
     if (existing) {
@@ -85,7 +90,9 @@ export async function confirmCheckout(ownerId: string, id: string) {
   assertDemoCheckout()
   return getDb().begin(async tx => {
     await lockOwner(tx, ownerId)
+    await assertAccountActive(tx, ownerId)
     const row = await ownedCheckout(tx, ownerId, id)
+    if (row.payment_mode !== 'test') fail(403, 'live_payment_required', 'Only verified payment provider events can confirm a live payment.')
     await ensureWelcome(tx, ownerId)
     if (row.status !== 'paid') {
       await tx`INSERT INTO token_ledger(id, owner_id, kind, amount, idempotency_key, label)
@@ -99,7 +106,7 @@ export async function confirmCheckout(ownerId: string, id: string) {
 
 /** Caller holds owner lock and creates take in the same transaction. */
 export async function reserveTakeTokens(tx: postgres.TransactionSql, ownerId: string, takeId: string, price: number) {
-  if (!Number.isSafeInteger(price) || price <= 0) fail(503, 'pricing_unavailable', 'Pricing is unavailable for this generation.')
+  if (!Number.isSafeInteger(price) || price < 0) fail(503, 'pricing_unavailable', 'Pricing is unavailable for this generation.')
   await ensureWelcome(tx, ownerId)
   await assertProviderSpendingAllowed(tx, ownerId)
   const balance = await balances(tx, ownerId)
@@ -110,6 +117,7 @@ export async function reserveTakeTokens(tx: postgres.TransactionSql, ownerId: st
 }
 /** Recheck at worker submission: a dev-accepted job must not bypass a later production guard. */
 export async function assertProviderSpendingAllowed(tx: postgres.TransactionSql, ownerId: string) {
+  await assertAccountActive(tx, ownerId)
   if (process.env.NODE_ENV === 'production' || process.env.VELA_ALLOW_DEMO_PROVIDER_SPEND !== 'true') {
     const [demo] = await tx`SELECT 1 FROM token_ledger WHERE owner_id = ${ownerId} AND kind = 'demo_purchase' LIMIT 1`
     if (demo) fail(403, 'demo_provider_spend_blocked', 'Test tokens cannot pay for live generation in this environment.')

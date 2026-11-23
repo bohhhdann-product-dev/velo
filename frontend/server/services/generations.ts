@@ -17,9 +17,11 @@ import { generatedMediaReservation } from './generated-media'
 import type { GenerationManifest, GenerationReference } from './generation/provider'
 import { quoteGeneration } from '../../app/entities/studio/pricing'
 import { reserveTakeTokens } from './billing'
+import { assertAccountActive, getAccountPolicy } from './account-policy'
+import { assertGenerationPolicy } from './generation/account-policy'
 
 const requestSchema = z.object({ generatorId: idSchema, expectedRevision: z.number().int().positive(), clientMutationId: idSchema,
-  expectedPriceTokens: z.number().int().positive().optional(), pricingVersion: z.string().max(100).optional() }).strict()
+  expectedPriceTokens: z.number().int().nonnegative().optional(), pricingVersion: z.string().max(100).optional() }).strict()
 const ACTIVE = ['queued', 'preparing', 'submitting', 'running', 'ingesting', 'unknown']
 export async function generationDto(db: Db, ownerId: string, id: string) {
   const [generation] = await db`SELECT * FROM generations WHERE id::text = ${id} AND owner_id = ${ownerId}`
@@ -45,6 +47,7 @@ export async function listGenerations(ownerId: string) {
 async function manifestFor(tx: postgres.TransactionSql, ownerId: string, board: ProjectBoard, generator: GeneratorNode, allowDisabled = false): Promise<GenerationManifest> {
   const config = generationConfig()
   const draft = structuredClone(generator.draft)
+  await assertGenerationPolicy(tx, ownerId, draft.modelId)
   const catalog = generationCapabilities()
   const capabilities = capabilitiesForModel(catalog, draft)
   if (draft.trial || (draft.mode === 'image' ? draft.modelId !== catalog.imageModel : !catalog.videoModels.includes(draft.modelId)))
@@ -107,7 +110,7 @@ export async function quoteSavedGeneration(ownerId: string, projectId: string, i
     if (!generator) fail(404, 'not_found', 'Generator not found')
     await validateProjectReferences(tx, ownerId, row.board.nodes)
     const manifest = await manifestFor(tx, ownerId, row.board, generator, true)
-    const quote = quoteGeneration(manifest.draft, manifest.references.length)
+    const quote = quoteGeneration(manifest.draft, manifest.references.length, (await getAccountPolicy(tx, ownerId)).discountPercent)
     if (!quote) fail(503, 'pricing_unavailable', 'Verified pricing is not available for this model yet.')
     return { quote, revision: row.revision }
   })
@@ -121,6 +124,7 @@ export async function createGeneration(ownerId: string, projectId: string, input
       ? [value.expectedPriceTokens ?? null, value.pricingVersion ?? null] : [])])).digest('hex')
   const accepted = await getDb().begin(async tx => {
     await lockOwner(tx, ownerId)
+    await assertAccountActive(tx, ownerId)
     const scope = `projects:${projectId}:generate`
     const [receipt] = await tx`SELECT fingerprint, reply, created_at > now() - interval '7 days' AS replayable FROM mutation_receipts
       WHERE owner_id = ${ownerId} AND scope = ${scope} AND client_mutation_id = ${value.clientMutationId}`
@@ -145,7 +149,7 @@ export async function createGeneration(ownerId: string, projectId: string, input
     if (running) fail(409, 'generation_active', 'This generator already has an active or unconfirmed generation.')
     await validateProjectReferences(tx, ownerId, row.board.nodes)
     const manifest = await manifestFor(tx, ownerId, row.board, generator)
-    const quote = priceQuote(manifest.draft, manifest.references.length)
+    const quote = priceQuote(manifest.draft, manifest.references.length, (await getAccountPolicy(tx, ownerId)).discountPercent)
     if (!quote) fail(503, 'pricing_unavailable', 'Verified pricing is not available for this model yet.')
     if ((value.expectedPriceTokens !== undefined && value.expectedPriceTokens !== quote.totalTokens)
       || (value.pricingVersion !== undefined && value.pricingVersion !== quote.version))

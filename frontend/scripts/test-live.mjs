@@ -157,7 +157,7 @@ const { createPinia, setActivePinia } = await import('pinia')
 const { useWorkspaceStore } = await import('../app/stores/workspace.ts')
 const { useStudioStore } = await import('../app/stores/studio.ts')
 const { useBillingStore } = await import('../app/stores/billing.ts')
-const fundedWallet = { availableTokens: 50000, totalTokens: 50000, reservedTokens: 0, welcomeTokens: 500, demoCheckoutEnabled: true, tokenUsd: 0.001, packs: [], ledger: [] }
+const fundedWallet = { availableTokens: 50000, totalTokens: 50000, reservedTokens: 0, welcomeTokens: 500, demoCheckoutEnabled: true, tokenUsd: 0.001, packs: [], ledger: [], discountPercent: 0, nsfwEnabled: true, isAdmin: false }
 const { useCharactersStore } = await import('../app/stores/characters.ts')
 setActivePinia(createPinia())
 const workspace = useWorkspaceStore()
@@ -1254,6 +1254,9 @@ assert.equal(selectedDraft.durationS, 15)
 assert.equal(selectedDraft.videoQuality, '720p')
 assert.equal(selectedDraft.prompt, 'A character study')
 assert.equal(JSON.stringify(modelsProject.edges), originalInputs, 'model switch cannot discard pinned inputs')
+useBillingStore().wallet = { ...fundedWallet, nsfwEnabled: false }
+assert.match(modelsStudio.generationBlocked('job-project', 'generator'), /18\+ model access/)
+useBillingStore().wallet = structuredClone(fundedWallet)
 assert.match(modelsStudio.generationBlocked('job-project', 'generator'), /Pricing is being confirmed/)
 assert.match(modelsStudio.connectionError('job-project', 'ref-9', 'generator'), /up to 9 references/)
 assert.match(modelsStudio.assetMentionOption('job-project', 'generator', { id: 'extra-asset', kind: 'image', name: 'Extra', handle: 'extra', url: '/api/assets/extra/file' }).disabled, /up to 9 references/)

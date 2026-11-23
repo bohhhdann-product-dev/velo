@@ -40,7 +40,7 @@ test('Voplica jobs: immutable Beta7, upload recovery, disable drain, URL refresh
     process.env.VELA_VOPLICA_ENABLED = 'true'
     await migrate(process.env.DATABASE_URL)
     const db = getDb(), owner = 'voplica-alice'
-    await db`INSERT INTO app_users(id) VALUES (${owner})`
+    await db`INSERT INTO app_users(id, nsfw_enabled) VALUES (${owner}, true)`
     process.env.VELA_DEMO_PAYMENTS_ENABLED = process.env.VELA_ALLOW_DEMO_PROVIDER_SPEND = 'true'
     const checkout = await createCheckout(owner, { packId: 'starter', idempotencyKey: randomUUID() })
     await confirmCheckout(owner, checkout.id)

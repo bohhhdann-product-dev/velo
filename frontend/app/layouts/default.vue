@@ -9,14 +9,17 @@ import {
   Plus,
   Trash2,
   UsersRound,
+  ShieldCheck,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import VelaBrand from '~/shared/ui/VelaBrand.vue'
 import AccountProfile from '~/features/workspace/AccountProfile.vue'
 import TokenBalance from '~/features/billing/TokenBalance.vue'
 import { useStudioStore } from '~/stores/studio'
+import { useBillingStore } from '~/stores/billing'
 import { ApiError } from '~/shared/api/workspace'
 const studio = useStudioStore()
+const billing = useBillingStore()
 const route = useRoute()
 const collapsed = shallowRef(false)
 const pending = shallowRef(false)
@@ -130,6 +133,9 @@ async function removeProject(id: string) {
         </button>
       </div>
       <div class="sidebar-bottom">
+        <NuxtLink v-if="billing.wallet?.isAdmin" to="/vl-admin-panel" class="nav-item" title="Admin panel">
+          <ShieldCheck class="size-[17px] shrink-0" /><span class="sidebar-label">Admin panel</span>
+        </NuxtLink>
         <TokenBalance />
         <div class="workspace-note sidebar-label">
           <span class="status-dot" />

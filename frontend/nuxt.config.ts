@@ -15,6 +15,7 @@ export default defineNuxtConfig({
     '/favorites': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
     '/billing': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
     '/billing/**': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/vl-admin-panel': { ssr: false, headers: { 'X-Robots-Tag': 'noindex, nofollow' } },
   },
   devtools: { enabled: false },
   modules: [

@@ -11,6 +11,7 @@ import { voplicaProvider } from './voplica'
 import { voplicaConfig } from './voplica-config'
 import { ProviderFailure, type GenerationManifest, type GenerationProvider, type ProviderOutput, type ProviderState } from './provider'
 import { assertProviderSpendingAllowed, settleTakeTokens } from '../billing'
+import { assertGenerationPolicy } from './account-policy'
 
 type Claim = { id: string; generation_id: string; owner_id: string; status: string; manifest: GenerationManifest;
   provider_task_id: string | null; provider_response: ProviderOutput | null; provider_state: ProviderState;
@@ -133,6 +134,7 @@ export async function runGenerationWorkerOnce(injectedProvider?: GenerationProvi
     }
     let output = claim.provider_response
     if (claim.status === 'queued') {
+      await assertGenerationPolicy(getDb(), claim.owner_id, claim.manifest.draft.modelId)
       let references = await referenceData(claim)
       if (provider.prepare) {
         if (Date.now() - new Date(claim.preparation_started_at!).getTime() > 3600_000)
@@ -145,6 +147,7 @@ export async function runGenerationWorkerOnce(injectedProvider?: GenerationProvi
         await lockOwner(tx, claim.owner_id)
         const [current] = await tx`SELECT id FROM generation_takes WHERE id = ${claim.id} AND lease_token = ${claim.lease_token} AND status = 'preparing' FOR UPDATE`
         if (!current) return false
+        await assertGenerationPolicy(tx, claim.owner_id, claim.manifest.draft.modelId)
         await assertProviderSpendingAllowed(tx, claim.owner_id)
         await assertMediaQuota(tx, claim.owner_id, 0, 0)
         await tx`UPDATE generation_takes SET status = 'submitting', submitted_at = now(), lease_until = now() + interval '5 minutes', updated_at = now() WHERE id = ${claim.id}`
@@ -201,7 +204,8 @@ export async function runGenerationWorkerOnce(injectedProvider?: GenerationProvi
       && Date.now() - new Date(claim.preparation_started_at!).getTime() < 3600_000) {
       await updateClaim(claim, 'queued', 'reference_upload_pending', 'Preparing reference images. This take has not been submitted yet.', 30)
     } else {
-      await updateClaim(claim, 'failed', error instanceof ProviderFailure ? error.code : 'invalid_input', error && typeof error === 'object' && 'statusMessage' in error
+      const policyCode = error && typeof error === 'object' && 'data' in error ? (error.data as { code?: string })?.code : undefined
+      await updateClaim(claim, 'failed', error instanceof ProviderFailure ? error.code : policyCode ?? 'invalid_input', error && typeof error === 'object' && 'statusMessage' in error
         ? String(error.statusMessage) : 'The reference images could not be prepared. Check that they are available and meet the model limits.')
     }
   }
