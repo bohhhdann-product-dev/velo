@@ -11,6 +11,7 @@ import {
   DURATION,
   IMAGE_QUALITIES,
   MODELS,
+  LIVE_VIDEO_MODELS,
   VIDEO_MODELS,
   videoModel,
   VIDEO_QUALITIES,
@@ -18,6 +19,8 @@ import {
 } from '~/entities/studio/catalog'
 import { GENERATOR_W, clampScale, inPort, outPort } from '~/entities/studio/geometry'
 import { useStudioStore } from '~/stores/studio'
+import { capabilitiesForModel } from '~/entities/studio/generation'
+import { toast } from 'vue-sonner'
 
 const props = defineProps<{
   node: GeneratorNode
@@ -34,6 +37,12 @@ const emit = defineEmits<{
 }>()
 
 const studio = useStudioStore()
+const capabilities = computed(() => capabilitiesForModel(studio.generationCapabilities, props.node.draft))
+const submission = computed(() => studio.generationSubmissions[props.node.id])
+async function reloadCanvas() {
+  try { await studio.reloadProject(props.projectId) }
+  catch (cause) { toast.error(cause instanceof Error ? cause.message : 'Could not reload the canvas.') }
+}
 const promptText = shallowRef(props.node.draft.prompt)
 watch(
   () => props.node.draft.prompt,
@@ -50,6 +59,7 @@ watch(promptText, () => {
 })
 
 function run() {
+  if (submission.value?.status === 'unconfirmed') { emit('run'); return }
   if (
     blocked.value ||
     (!promptText.value.trim() && !references.value.length && !hasFrames.value)
@@ -59,11 +69,20 @@ function run() {
   emit('run')
 }
 
-const modelOptions = computed(() =>
-  props.node.draft.mode === 'image'
-    ? [{ value: MODELS.image.id, label: MODELS.image.label }]
-    : VIDEO_MODELS,
-)
+const modelOptions = computed(() => {
+  const options = props.node.draft.mode === 'image' ? [{ value: MODELS.image.id, label: MODELS.image.label }] : studio.live ? LIVE_VIDEO_MODELS : VIDEO_MODELS
+  if (!studio.live) return options
+  const available = props.node.draft.mode === 'image' ? [studio.generationCapabilities.imageModel] : studio.generationCapabilities.videoModels
+  return options.map((option) => {
+    const caps = capabilitiesForModel(studio.generationCapabilities, { modelId: option.value })
+    // Drafts can be prepared before a provider is funded or enabled; Generate owns the access gate.
+    const disabled = !available.includes(option.value)
+    return { ...option, disabled, reason: disabled ? 'This model is unavailable.' : !caps.enabled ? caps.reason ?? undefined : undefined }
+  })
+})
+const aspectOptions = computed(() => studio.live ? ASPECTS.filter((option) => capabilities.value.aspects.includes(option.value)) : ASPECTS)
+const imageQualityOptions = computed(() => studio.live ? IMAGE_QUALITIES.filter((option) => capabilities.value.imageQualities.includes(option.value)) : IMAGE_QUALITIES)
+const videoQualityOptions = computed(() => studio.live ? VIDEO_QUALITIES.filter((option) => capabilities.value.videoQualities.includes(option.value)) : VIDEO_QUALITIES)
 const model = computed(() => videoModel(props.node.draft))
 function update(patch: Partial<GeneratorNode['draft']>) {
   studio.updateDraft(props.projectId, props.node.id, patch)
@@ -80,11 +99,11 @@ function clearFrame(slot: 'start' | 'end') {
   if (edge) studio.disconnect(props.projectId, edge.id)
 }
 
-const countOptions = COUNTS.map((n) => ({
+const countOptions = computed(() => (studio.live ? capabilities.value.counts : COUNTS).map((n) => ({
   value: n,
   label: n === 1 ? '1 output' : `${n} outputs`,
   shortLabel: `× ${n}`,
-}))
+})))
 
 const references = computed(() => studio.connectedReferences(props.projectId, props.node.id))
 
@@ -92,11 +111,18 @@ const price = computed(() => priceCredits(props.node.draft))
 
 const activeTakes = computed(() => studio.activeCount(props.projectId, props.node.id))
 const hasFrames = computed(() => Boolean(frame('start') || frame('end')))
+const supportsFrames = computed(() => props.node.draft.mode === 'video' && (!studio.live || capabilities.value.referenceModes.includes('start-end')))
+const supportsReferences = computed(() => !studio.live || capabilities.value.referenceModes.includes('images'))
 const referenceLimit = computed(() =>
-  props.node.draft.mode === 'image' ? 6 : model.value.maxReferences,
+  studio.live ? (props.node.draft.mode === 'image' ? capabilities.value.maxImageReferences : capabilities.value.maxVideoReferences) : props.node.draft.mode === 'image' ? 6 : model.value.maxReferences,
 )
 const blocked = computed(() => {
-  if (studio.live) return 'Generation is not enabled yet'
+  if (studio.live) {
+    if (submission.value?.status === 'submitting') return 'Submitting generation…'
+    if (submission.value?.status === 'expired') return submission.value.message || 'Reload the saved canvas to reconcile this request.'
+    if (submission.value?.status === 'unconfirmed') return ''
+    return studio.generationBlocked(props.projectId, props.node.id)
+  }
   if (activeTakes.value) return 'Generation in progress'
   if (references.value.length > referenceLimit.value)
     return `Remove extra references (maximum ${referenceLimit.value})`
@@ -139,7 +165,7 @@ function disconnectReference(referenceId: string) {
         <span>References</span
         ><span
           >{{ references.length }} /
-          {{ node.draft.mode === 'image' ? 6 : model.maxReferences }}</span
+          {{ referenceLimit }}</span
         >
       </div>
       <div class="reference-strip" @pointerdown.stop @wheel.stop>
@@ -154,19 +180,19 @@ function disconnectReference(referenceId: string) {
         </div>
         <button
           class="add-reference"
-          :disabled="hasFrames || references.length >= referenceLimit"
-          :title="hasFrames ? 'Disconnect frame inputs to use references' : 'Choose an image'"
+          :disabled="!supportsReferences || hasFrames || references.length >= referenceLimit"
+          :title="!supportsReferences ? 'This model does not support reference images.' : hasFrames ? 'Disconnect frame inputs to use references' : 'Choose an image'"
           aria-label="Add a reference"
           @click.stop="$emit('pickReference')"
         >
           <Plus class="size-4" />
         </button>
         <span v-if="!references.length" class="reference-hint"
-          >Add an image to guide your result</span
+          >{{ studio.live && node.draft.mode === 'video' && !capabilities.characterVideo ? 'People need BytePlus-verified assets.' : 'Add an image to guide your result' }}</span
         >
       </div>
     </section>
-    <div v-if="node.draft.mode === 'video'" class="frame-inputs">
+    <div v-if="supportsFrames || hasFrames" class="frame-inputs">
       <div
         v-for="slot in ['start', 'end'] as const"
         :key="slot"
@@ -175,8 +201,8 @@ function disconnectReference(referenceId: string) {
       >
         <button
           class="frame-picker"
-          :disabled="references.length > 0"
-          :title="references.length ? 'Disconnect references to use frame inputs' : undefined"
+          :disabled="!supportsFrames || references.length > 0"
+          :title="!supportsFrames ? 'This model does not support start/end frames.' : references.length ? 'Disconnect references to use frame inputs' : undefined"
           @click="$emit('pickReference', slot)"
         >
           <span class="frame-thumbnail"
@@ -221,9 +247,10 @@ function disconnectReference(referenceId: string) {
     <div class="generator-settings" @pointerdown.stop>
       <div class="setting">
         <span>Format</span
-        ><VPillMenu
+        ><span v-if="studio.live && hasFrames && node.draft.modelId === 'seedance-2-5'" class="fixed-parameter">From first frame</span><VPillMenu
+          v-else
           :model-value="node.draft.aspect"
-          :options="ASPECTS"
+          :options="aspectOptions"
           label="Aspect ratio"
           @update:model-value="update({ aspect: $event })"
         />
@@ -233,7 +260,7 @@ function disconnectReference(referenceId: string) {
         <VPillMenu
           v-if="node.draft.mode === 'image'"
           :model-value="node.draft.imageQuality"
-          :options="IMAGE_QUALITIES"
+          :options="imageQualityOptions"
           label="Quality"
           @update:model-value="update({ imageQuality: $event })"
         />
@@ -241,7 +268,7 @@ function disconnectReference(referenceId: string) {
         <VPillMenu
           v-else
           :model-value="node.draft.videoQuality"
-          :options="VIDEO_QUALITIES"
+          :options="videoQualityOptions"
           label="Quality"
           @update:model-value="update({ videoQuality: $event })"
         />
@@ -261,13 +288,14 @@ function disconnectReference(referenceId: string) {
       <VSlider
         v-if="!node.draft.trial"
         :model-value="node.draft.durationS"
-        :min="DURATION.min"
-        :max="model.maxDuration"
-        :step="1"
+        :min="studio.live ? capabilities.videoDuration.min : DURATION.min"
+        :max="studio.live ? capabilities.videoDuration.max : model.maxDuration"
+        :step="studio.live ? capabilities.videoDuration.step : 1"
         @update:model-value="update({ durationS: $event })"
       />
       <span v-else class="text-ink-3">Quick preview</span>
       <button
+        v-if="!studio.live || node.draft.trial"
         role="switch"
         :aria-checked="node.draft.trial"
         aria-label="Trial generation: 4 seconds at 480p"
@@ -280,20 +308,21 @@ function disconnectReference(referenceId: string) {
     <div class="generator-footer" @pointerdown.stop>
       <span class="generation-note" :title="blocked || undefined"
         ><span v-if="activeTakes" class="busy-dot" />{{
-          activeTakes ? `Creating ${activeTakes} outputs` : blocked || 'Ready when you are'
+          submission?.status === 'unconfirmed' ? 'Request unconfirmed. Check its receipt; no new job will be submitted.' : activeTakes ? (studio.generationPollError || `Creating ${activeTakes} outputs`) : blocked || submission?.message || 'Ready when you are'
         }}</span
       >
       <button
         class="generate-button"
-        :disabled="Boolean(blocked) || (!promptText.trim() && !references.length && !hasFrames)"
+        :disabled="Boolean(blocked) || (submission?.status !== 'unconfirmed' && !promptText.trim() && !references.length && !hasFrames)"
         :title="blocked || undefined"
         @click.stop="run"
       >
-        <Play class="size-3.5" /> {{ activeTakes ? 'Creating…' : 'Generate' }}
+        <Play class="size-3.5" /> {{ submission?.status === 'unconfirmed' ? 'Check request' : submission?.status === 'submitting' ? 'Submitting…' : activeTakes ? 'Creating…' : 'Generate' }}
         <span v-if="!studio.live"
           >{{ price }} <span class="font-normal opacity-70">cr</span></span
         >
       </button>
+      <button v-if="submission?.status === 'expired'" class="text-xs underline" @click="reloadCanvas">Reload saved canvas</button>
     </div>
     <template #ports>
       <button
@@ -301,14 +330,14 @@ function disconnectReference(referenceId: string) {
         :style="{ top: `${inPort(node).y - node.y - 8}px` }"
         data-port="in"
         :data-node-id="node.id"
-        :disabled="hasFrames || references.length >= referenceLimit"
+        :disabled="!supportsReferences || hasFrames || references.length >= referenceLimit"
         aria-label="Choose reference input"
         title="Choose a reference · or drop a connection here"
         @pointerdown.stop
         @click.stop="$emit('pickReference')"
       />
       <button
-        v-for="slot in node.draft.mode === 'video' ? (['start', 'end'] as const) : []"
+        v-for="slot in supportsFrames ? (['start', 'end'] as const) : []"
         :key="slot"
         class="node-port input-port"
         :style="{ top: `${inPort(node, slot).y - node.y - 8}px` }"

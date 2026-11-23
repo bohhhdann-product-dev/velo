@@ -1,21 +1,29 @@
 <script setup lang="ts">
 import { Toaster } from 'vue-sonner'
 import 'vue-sonner/style.css'
-import WorkspaceGate from '~/features/workspace/WorkspaceGate.vue'
 import { useWorkspaceStore } from '~/stores/workspace'
+const WorkspaceGate = defineAsyncComponent(
+  () => import('~/features/workspace/WorkspaceGate.vue'),
+)
 const config = useRuntimeConfig()
+// Nuxt's page route waits for NuxtPage to mount. The auth gate can intentionally
+// withhold that page, so this boundary must follow the router immediately.
+const route = useRouter().currentRoute
+const publicPage = computed(() => route.value.path === '/')
 const workspace = useWorkspaceStore()
 workspace.live = config.public.appMode === 'live'
 const configured = Boolean(config.public.clerkPublishableKey)
 </script>
 
 <template>
+  <NuxtLayout v-if="publicPage"><NuxtPage /></NuxtLayout>
   <div
-    v-if="workspace.live && !configured"
+    v-else-if="workspace.live && !configured"
     class="flex min-h-screen flex-col items-center justify-center gap-3 p-8 text-center"
   >
     <h1 class="text-xl">Your workspace needs a sign-in connection</h1>
     <p class="text-ink-2">Set the Clerk publishable key to open Vela in live mode.</p>
+    <NuxtLink to="/" class="underline">Back to Vela</NuxtLink>
   </div>
   <WorkspaceGate v-else-if="workspace.live">
     <NuxtLayout><NuxtPage /></NuxtLayout>

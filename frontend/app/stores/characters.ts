@@ -4,6 +4,7 @@ import { useWorkspaceStore } from '~/stores/workspace'
 import { createSaveQueue, type SaveState } from '~/shared/persistence/saveQueue'
 import { createDraftRecovery } from '~/shared/persistence/recovery'
 import { characterPayload } from '~/shared/persistence/characterPayload'
+import { requiresReload } from '~/shared/api/workspace'
 import type {
   Character,
   CharacterPhoto,
@@ -15,7 +16,7 @@ import { uniqueHandle } from '~/entities/studio/mentions'
 let sequence = 0
 export const useCharactersStore = defineStore('characters', () => {
   const workspace = useWorkspaceStore()
-  const recovery = createDraftRecovery()
+  let recovery = createDraftRecovery()
   const live = computed(() => workspace.live)
   const items = ref<Character[]>([])
   const saveStates = ref<Record<string, SaveState>>({})
@@ -52,6 +53,7 @@ export const useCharactersStore = defineStore('characters', () => {
   }
   function hydrateLive(loaded: Character[]) {
     resetPrivate()
+    recovery = createDraftRecovery()
     items.value = loaded
     queue = createSaveQueue({
       async write(id, character, expectedRevision, clientMutationId) {
@@ -66,6 +68,9 @@ export const useCharactersStore = defineStore('characters', () => {
       dirty(id, payload, revision) {
         if (workspace.userId)
           recovery.save(workspace.userId, 'character', id, payload, revision)
+      },
+      clean(id) {
+        if (workspace.userId) recovery.remove(workspace.userId, 'character', id)
       },
       saved(id, canonical, _sent, unchanged) {
         if (unchanged && workspace.userId) recovery.remove(workspace.userId, 'character', id)
@@ -152,9 +157,11 @@ export const useCharactersStore = defineStore('characters', () => {
       throw new Error('Retry the previous action before continuing.')
     busy.value[id] = true
     const key = `character:action:${id}`
+    let held = false
     try {
       // Flush also drains edits that arrive while an earlier save is in flight.
       if (!prior) await flush(id)
+      workspace.assertSession(session)
       const local = find(id)
       if (!local) throw new Error('Character not found.')
       const pending = prior ?? {
@@ -164,6 +171,7 @@ export const useCharactersStore = defineStore('characters', () => {
       }
       pendingActions.set(id, pending)
       queue?.hold(id)
+      held = true
       const { character } = await workspace.mutate<{ character: Character }>(
         key,
         `/api/characters/${id}/${operation}`,
@@ -186,22 +194,23 @@ export const useCharactersStore = defineStore('characters', () => {
       return character
     } catch (cause) {
       workspace.assertSession(session)
-      if (workspace.hasPendingMutation(key)) {
+      if (requiresReload(cause)) {
+        queue?.hold(id)
+        saveStates.value[id] = {
+          status: 'conflict',
+          code: (cause as { code?: string }).code,
+          message: cause instanceof Error ? cause.message : 'Reload the saved character to continue.',
+        }
+        if (!workspace.hasPendingMutation(key)) pendingActions.delete(id)
+      } else if (workspace.hasPendingMutation(key)) {
         saveStates.value[id] = {
           status: 'error',
           message:
             'Could not confirm the action. Retry to recover its result; your edits are kept.',
         }
-      } else {
+      } else if (held) {
         pendingActions.delete(id)
-        if ((cause as { status?: number }).status === 409) {
-          queue?.hold(id)
-          saveStates.value[id] = {
-            status: 'conflict',
-            message:
-              'This character changed in another session. Reload the saved version to continue.',
-          }
-        } else queue?.release(id)
+        queue?.release(id)
       }
       throw cause
     } finally {
@@ -229,14 +238,23 @@ export const useCharactersStore = defineStore('characters', () => {
   async function removeAsync(id: string) {
     const session = workspace.sessionVersion
     if (workspace.live) {
-      await flush(id)
-      await workspace.mutate(`character:delete:${id}`, `/api/characters/${id}`, {
-        method: 'DELETE',
-        body: {
-          expectedRevision: find(id)?.storageRevision,
-          clientMutationId: crypto.randomUUID(),
-        },
-      })
+      const key = `character:delete:${id}`
+      if (!workspace.hasPendingMutation(key)) await flush(id)
+      workspace.assertSession(session)
+      queue?.hold(id)
+      try {
+        await workspace.mutate(key, `/api/characters/${id}`, {
+          method: 'DELETE',
+          body: {
+            expectedRevision: find(id)?.storageRevision,
+            clientMutationId: crypto.randomUUID(),
+          },
+        })
+      } catch (cause) {
+        workspace.assertSession(session)
+        if (!workspace.hasPendingMutation(key)) queue?.release(id)
+        throw cause
+      }
     }
     workspace.assertSession(session)
     queue?.remove(id)
@@ -249,6 +267,9 @@ export const useCharactersStore = defineStore('characters', () => {
       `/api/characters/${id}`,
     )
     workspace.assertSession(session)
+    pendingActions.delete(id)
+    workspace.forgetMutation(`character:action:${id}`)
+    workspace.forgetMutation(`character:delete:${id}`)
     register(character)
     if (workspace.userId) recovery.remove(workspace.userId, 'character', id)
     const index = items.value.findIndex((c) => c.id === id)

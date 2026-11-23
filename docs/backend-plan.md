@@ -1,6 +1,6 @@
 # Vela backend — implementation plan v3
 
-2026-11-21. Replaces the earlier Encore proposal. The chosen stack is **Nuxt/Nitro, PostgreSQL, Clerk and private S3**. One application, versioned SQL migrations and a small set of domain services. No paid generation in this release.
+2026-11-21. Replaces the earlier Encore proposal. The chosen stack is **Nuxt/Nitro, PostgreSQL, Clerk and private S3**. One application, versioned SQL migrations and a small set of domain services. Persistence is implemented; the ModelArk adapter and a separate PostgreSQL-backed generation worker are prepared but remain disabled without configuration.
 
 ## Five delivery parts
 
@@ -28,6 +28,10 @@ Pinia owns immediate canvas interaction. A persistence coordinator sends debounc
 
 The database transaction checks a mutation receipt before checking the revision. Retrying an uncertain request therefore does not apply it twice. Reusing a mutation ID with a different payload is rejected. A stale revision returns 409; the UI retains local work and offers recovery instead of silently choosing a winner.
 
+Full mutation responses can be replayed for seven days. Older requests return `410 receipt_expired` and require reloading/reconciling the server state; the client must not silently retry them with a new ID. Maintenance removes expired response payloads in bounded batches while retaining compact mutation identities and fingerprints to prevent reexecution.
+
+Recovery drafts belong to an individual editor session, not just a project or character. A successful save only removes that editor's own draft. Older recovery candidates remain until explicitly restored or discarded, so another tab cannot erase them.
+
 Undo/redo remains local canvas history. It does not undo uploads, billing or provider work. Project deletion creates a tombstone so delayed saves cannot resurrect it.
 
 ## Media lifecycle
@@ -35,7 +39,7 @@ Undo/redo remains local canvas history. It does not undo uploads, billing or pro
 For this first release, files upload through the authenticated API. This keeps validation and access control in one place and avoids a separate upload-completion protocol.
 
 - Accept JPG, PNG or WebP, up to 12 MiB and 40 megapixels; decode the content instead of trusting the extension.
-- Bound the incoming stream even without Content-Length. Limit concurrent image processing and per-user storage/upload usage.
+- Bound the incoming stream even without Content-Length. Acquire upload admission before reading the multipart body and hold it through processing and persistence. Limit per-user storage/upload usage as well.
 - Apply orientation, strip EXIF/GPS, and write normalized WebP source plus preview using immutable generated object keys.
 - Commit asset metadata only with its storage operation; ambiguous failure cleanup must not remove committed files.
 - Serve files through an authenticated same-origin endpoint. No public bucket and no arbitrary external URL fetching.
@@ -43,7 +47,7 @@ For this first release, files upload through the authenticated API. This keeps v
 
 S3 is configured with all public-access blocks, bucket-owner-enforced ownership, encryption at rest and a policy denying insecure transport. Local storage is outside `public/`; production must not silently fall back to a development directory.
 
-Direct-to-S3 uploads, resumable uploads and an asynchronous worker can be introduced when measured traffic or video sizes justify them. They are not required for the current photo workflow.
+Direct-to-S3 and resumable uploads can be introduced when measured traffic justifies them. Photo uploads remain synchronous; generation uses a separate durable worker.
 
 ## Character workflow
 
@@ -53,6 +57,8 @@ Changing face inputs invalidates downstream approval and the sheet. Changing bod
 
 A published character has an immutable version and sheet asset. A canvas reference pins both. Subsequent edits or removal from the character library do not silently replace a project's existing reference.
 
+Versions no longer used by an active project or the current character are retired under the same owner lock used for writes. Retired versions cannot be added to new project references and no longer prevent deletion of unused source photos. Their unused sheets follow the seven-day soft-delete grace period. Download serves the full-resolution sheet; the smaller preview remains for display.
+
 ## Environments and deployment boundary
 
 Development uses local PostgreSQL and Clerk Development, with private S3 or local media. The app has an explicit demo mode for UI work and live mode for real persistence. Live mode starts empty and does not import sample credits or outputs.
@@ -61,10 +67,12 @@ Production hosting is a separate deployment step: select a domain and monthly bu
 
 Production readiness also requires a restore drill, scheduled maintenance, monitoring, account-deletion lifecycle, user-facing privacy/retention rules and load testing. A passing local build alone does not establish these.
 
-## Later: real generations
+## Generation integration: prepared, disabled by default
 
-After persistence is accepted, connect the actual Seedance/Seedream provider and verify its supported models, identity-reference requirements and pricing. Existing UI labels are not an API contract.
+The chosen provider is BytePlus ModelArk. The implemented adapter targets Seedream 5 Pro and Seedance 2.5 in Singapore. See [modelark-setup.md](modelark-setup.md) for account/model activation, configuration and the explicit worker command. No paid provider call has been made during pre-key validation.
 
-Use durable generation jobs, immutable input manifests, idempotent submission and verified callbacks/polling. Record the provider submission before a paid call; an ambiguous timeout requires reconciliation rather than a blind second charge. Copy completed outputs to owned storage before marking them ready. Add credit reservation/settlement only alongside the real provider contract.
+PostgreSQL stores durable takes, immutable input manifests, receipts, leases and reserved storage capacity. Submission markers precede paid calls; ambiguous outcomes require reconciliation rather than a second charge. Video task IDs survive worker restarts. Completed files are copied to owned storage before results become ready. Generated originals retain their bytes; authenticated MP4 streaming supports ranges. Credit billing is deferred.
+
+Photo-based characters are image references. Seedance real-person video requires separate BytePlus authorization and provider assets; local photo approval is not that authorization. Vela exposes this limit and blocks direct character-video submission pending that separate integration.
 
 No Encore, Redis, Kubernetes, microservice split or distributed canvas editing is necessary for this first release.

@@ -1,18 +1,22 @@
 import { mkdir, readFile, writeFile, unlink, readdir, stat, realpath } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import type { Readable } from 'node:stream'
 import { isAbsolute, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
-import { S3Client, PutObjectCommand, GetObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3'
+import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand, DeleteObjectCommand, ListObjectsV2Command } from '@aws-sdk/client-s3'
 
 export interface StoredObject { key: string; modifiedAt: Date }
 export interface MediaStorage {
-  put(key: string, bytes: Buffer): Promise<void>
+  put(key: string, bytes: Buffer, mimeType?: string): Promise<void>
   get(key: string): Promise<Buffer>
+  stat(key: string): Promise<{ size: number }>
+  stream(key: string, range?: { start: number; end: number }): Promise<Readable>
   remove(key: string): Promise<void>
   list(): AsyncIterable<StoredObject>
 }
 
 // Neither a filename, user ID nor a URL is ever accepted as a storage path.
-const KEY = /^media\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(source|preview)\.webp$/
+const KEY = /^media\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\/(source\.(webp|png|jpg|mp4)|preview\.(webp|png|jpg))$/
 function assertKey(key: string) {
   if (!KEY.test(key)) throw new Error('Invalid private media key')
 }
@@ -42,6 +46,16 @@ export function localStorage(directory: string): MediaStorage {
       const filename = path(key)
       return ensurePrivateRoot().then(() => readFile(filename))
     },
+    async stat(key) {
+      const filename = path(key)
+      await ensurePrivateRoot()
+      return { size: (await stat(filename)).size }
+    },
+    async stream(key, range) {
+      const filename = path(key)
+      await ensurePrivateRoot()
+      return createReadStream(filename, range)
+    },
     async remove(key) {
       await ensurePrivateRoot()
       await unlink(path(key)).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'ENOENT') throw error })
@@ -52,8 +66,8 @@ export function localStorage(directory: string): MediaStorage {
         .catch((error: NodeJS.ErrnoException) => { if (error.code === 'ENOENT') return []; throw error })
       for (const directory of directories) {
         if (!directory.isDirectory()) continue
-        for (const variant of ['source', 'preview']) {
-          const key = `media/${directory.name}/${variant}.webp`
+        for (const filename of await readdir(resolve(root, 'media', directory.name))) {
+          const key = `media/${directory.name}/${filename}`
           if (!KEY.test(key)) continue
           const info = await stat(path(key)).catch((error: NodeJS.ErrnoException) => {
             if (error.code === 'ENOENT') return null
@@ -71,10 +85,10 @@ export function s3Storage(bucket: string, region: string): MediaStorage {
   // Uses the SDK default credential chain (local AWS profile / runtime IAM role).
   const client = new S3Client({ region })
   return {
-    async put(key, bytes) {
+    async put(key, bytes, mimeType = 'image/webp') {
       assertKey(key)
       await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: bytes,
-        ContentType: 'image/webp', CacheControl: 'private, no-store', IfNoneMatch: '*',
+        ContentType: mimeType, CacheControl: 'private, no-store', IfNoneMatch: '*',
         ServerSideEncryption: 'AES256' }))
     },
     async get(key) {
@@ -82,6 +96,19 @@ export function s3Storage(bucket: string, region: string): MediaStorage {
       const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key }))
       if (!response.Body) throw new Error('Private object is missing')
       return Buffer.from(await response.Body.transformToByteArray())
+    },
+    async stat(key) {
+      assertKey(key)
+      const response = await client.send(new HeadObjectCommand({ Bucket: bucket, Key: key }))
+      if (response.ContentLength === undefined) throw new Error('Private object size is missing')
+      return { size: response.ContentLength }
+    },
+    async stream(key, range) {
+      assertKey(key)
+      const response = await client.send(new GetObjectCommand({ Bucket: bucket, Key: key,
+        ...(range ? { Range: `bytes=${range.start}-${range.end}` } : {}) }))
+      if (!response.Body || !('pipe' in response.Body)) throw new Error('Private object stream is missing')
+      return response.Body as Readable
     },
     async remove(key) {
       assertKey(key)

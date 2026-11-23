@@ -42,5 +42,6 @@ export const useWorkspaceStore = defineStore('workspace', () => {
     request,
     mutate: mutations.run,
     hasPendingMutation: mutations.has,
+    forgetMutation: mutations.forget,
   }
 })

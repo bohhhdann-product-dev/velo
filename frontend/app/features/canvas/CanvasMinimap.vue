@@ -158,7 +158,8 @@ function onKeyDown(event: KeyboardEvent) {
   position: absolute;
   right: 18px;
   bottom: 66px;
-  width: min(240px, calc(100% - 36px));
+  /* Reserve the left tool rail and a gap even when the map is opened on a phone. */
+  width: min(240px, calc(100% - 96px));
   aspect-ratio: 240 / 154;
   overflow: hidden;
   border: 1px solid #ffffff1c;

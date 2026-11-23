@@ -14,7 +14,9 @@
     "test:studio": "node scripts/test-studio.mjs",
     "test:server": "tsx --test tests/server/*.test.ts",
     "media:cleanup": "node --env-file-if-exists=.env --import tsx scripts/cleanup-media.ts",
-    "test:live": "node scripts/test-live.mjs"
+    "generation:worker": "node --env-file-if-exists=.env --import tsx scripts/generation-worker.ts",
+    "test:live": "node scripts/test-live.mjs",
+    "voplica:check": "node --env-file-if-exists=.env --import tsx scripts/voplica-check.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1175.0",

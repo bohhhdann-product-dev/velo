@@ -1,7 +1,10 @@
+import { isDefinitiveRejection, requiresReload } from '../api/workspace'
+
 /** One writer per workspace. Retry the exact mutation after an uncertain response. */
 export type SaveState = {
   status: 'saved' | 'pending' | 'saving' | 'error' | 'conflict'
   message?: string
+  code?: string
 }
 type Entry<T> = {
   revision: number
@@ -25,6 +28,7 @@ export function createSaveQueue<T, R>(options: {
   saved: (id: string, result: R, sent: T, unchanged: boolean) => void
   state: (id: string, state: SaveState) => void
   dirty?: (id: string, value: T, revision: number) => void
+  clean?: (id: string) => void
   debounceMs?: number
   maxWaitMs?: number
 }) {
@@ -52,7 +56,10 @@ export function createSaveQueue<T, R>(options: {
     const entry = entries.get(id)
     if (!entry || disposed) return
     entry.latest = value
-    if (entry.saved === fingerprint(value) && !entry.pending) return
+    if (entry.saved === fingerprint(value) && !entry.pending && !entry.held) {
+      markClean(id, entry)
+      return
+    }
     options.dirty?.(id, value, entry.revision)
     if (entry.blocked || entry.held) return
     options.state(id, { status: entry.pending ? 'saving' : 'pending' })
@@ -67,6 +74,14 @@ export function createSaveQueue<T, R>(options: {
       void drain()
     }, delay)
   }
+  function markClean(id: string, entry: Entry<T>) {
+    clearTimeout(entry.timer)
+    entry.due = false
+    entry.firstDirty = undefined
+    entry.blocked = false
+    options.clean?.(id)
+    options.state(id, { status: 'saved' })
+  }
   async function process() {
     while (!disposed) {
       const next = [...entries].find(([, e]) => e.due && !e.blocked && !e.held)
@@ -75,7 +90,10 @@ export function createSaveQueue<T, R>(options: {
       entry.due = false
       clearTimeout(entry.timer)
       entry.firstDirty = undefined
-      if (!entry.pending && entry.saved === fingerprint(entry.latest)) continue
+      if (!entry.pending && entry.saved === fingerprint(entry.latest)) {
+        markClean(id, entry)
+        continue
+      }
       entry.pending ??= {
         value: JSON.parse(fingerprint(entry.latest)),
         fingerprint: fingerprint(entry.latest),
@@ -102,9 +120,10 @@ export function createSaveQueue<T, R>(options: {
       } catch (cause) {
         if (disposed || entries.get(id) !== entry) continue
         entry.blocked = true
-        const status = (cause as { status?: number }).status
+        if (isDefinitiveRejection(cause) && !requiresReload(cause)) entry.pending = undefined
         options.state(id, {
-          status: status === 409 ? 'conflict' : 'error',
+          status: requiresReload(cause) ? 'conflict' : 'error',
+          code: (cause as { code?: string })?.code,
           message: cause instanceof Error ? cause.message : 'Could not save changes.',
         })
       }
@@ -143,6 +162,7 @@ export function createSaveQueue<T, R>(options: {
     if (entry) {
       entry.held = true
       clearTimeout(entry.timer)
+      options.state(id, { status: 'pending' })
     }
   }
   function release(id: string) {

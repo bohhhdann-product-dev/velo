@@ -3,7 +3,17 @@ import tailwindcss from '@tailwindcss/vite'
 
 export default defineNuxtConfig({
   compatibilityDate: '2026-11-01',
-  ssr: false,
+  ssr: true,
+  // Public content is readable before JavaScript; the editor keeps its client-only lifecycle.
+  routeRules: {
+    '/': { prerender: true },
+    '/studio': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/p/**': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/characters': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/characters/**': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/library': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+    '/favorites': { ssr: false, headers: { 'X-Robots-Tag': 'noindex' } },
+  },
   devtools: { enabled: false },
   modules: [
     '@pinia/nuxt',
@@ -16,6 +26,9 @@ export default defineNuxtConfig({
               publishableKey:
                 env.CLERK_PUBLISHABLE_KEY || env.NUXT_PUBLIC_CLERK_PUBLISHABLE_KEY,
               skipServerMiddleware: true,
+              signInUrl: '/studio',
+              signUpUrl: '/studio?auth=sign-up',
+              afterSignOutUrl: '/',
             },
           ] as [string, Record<string, unknown>],
         ]
@@ -36,6 +49,7 @@ export default defineNuxtConfig({
   app: {
     head: {
       title: 'Vela',
+      link: [{ rel: 'icon', type: 'image/svg+xml', href: '/favicon.svg' }],
       meta: [
         {
           name: 'viewport',

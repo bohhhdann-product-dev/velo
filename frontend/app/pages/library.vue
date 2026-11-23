@@ -66,7 +66,7 @@ async function remove(id: string) {
       <input
         ref="fileInput"
         type="file"
-        accept="image/*"
+        accept="image/jpeg,image/png,image/webp"
         multiple
         class="hidden"
         @change="onFiles"
@@ -78,7 +78,8 @@ async function remove(id: string) {
     <div v-if="studio.library.length" class="collection-grid">
       <article v-for="item in studio.library" :key="item.id" class="library-card group">
         <div class="library-media">
-          <img :src="item.url" :alt="item.name" loading="lazy" />
+          <video v-if="item.mediaType === 'video'" :src="item.url" :poster="item.posterUrl ?? undefined" controls preload="metadata" :aria-label="item.name" class="size-full object-cover" />
+          <img v-else :src="item.url" :alt="item.name" loading="lazy" />
           <AssetFavoriteButton v-if="studio.live" :id="item.id" :favorite="item.favorite" />
           <button
             type="button"

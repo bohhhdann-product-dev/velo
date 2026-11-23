@@ -19,6 +19,7 @@ async function main() {
   const result = await cleanupMedia({ dryRun })
   console.log(JSON.stringify({ mode: dryRun ? 'dry-run' : 'applied',
     deletedAssets: result.deletedAssets.length, orphanObjects: result.orphanKeys.length,
+    retiredVersions: result.retiredVersions.length, compactedReceipts: result.receipts, receiptReplayDays: 7,
     batchLimit: 100, deletedRetentionDays: 7, orphanRetentionHours: 24 }))
 }
 

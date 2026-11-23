@@ -4,6 +4,10 @@ export interface MapTransform extends Point {
   scale: number
 }
 
+export function minimapDefaultVisible(size: { w: number; h: number }) {
+  return size.w >= 520 && size.h >= 360
+}
+
 // Keep the camera in the map even when it is panned beyond the last node.
 export function fitMinimap(
   nodes: Bounds[],

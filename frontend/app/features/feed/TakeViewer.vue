@@ -48,13 +48,13 @@ const isVideo = computed(() => props.generation?.draft.mode === 'video')
           {{ generation.draft.prompt }}
         </p>
         <div class="flex shrink-0 items-center gap-2">
-          <VButton variant="soft" size="sm" @click="studio.toggleFavorite(take.id)">
+          <VButton variant="soft" size="sm" :disabled="studio.favoritePending[take.id]" @click="studio.toggleFavorite(take.id)">
             <Heart class="size-4" :class="take.favorite ? 'fill-danger text-danger' : ''" />
             {{ take.favorite ? 'Saved' : 'Save' }}
           </VButton>
           <a
             v-if="take.url"
-            :href="take.url"
+            :href="take.assetId ? `/api/assets/${encodeURIComponent(take.assetId)}/file?variant=source` : take.url"
             download
             class="inline-flex h-8 items-center gap-1.5 rounded-(--radius-xs) bg-accent px-3.5 text-[13px] font-medium text-black hover:bg-accent-hover"
           >

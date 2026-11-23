@@ -89,7 +89,11 @@ test('PostgreSQL project API: auth, isolation, persistence, concurrency and rece
       }
       const valid = await call('GET', '/api/bootstrap')
       assert.equal(valid.status, 200)
-      assert.deepEqual(valid.body, { user: { id: ownerA }, projects: [], generationEnabled: false })
+      assert.deepEqual(valid.body.user, { id: ownerA })
+      assert.deepEqual(valid.body.projects, [])
+      assert.deepEqual(valid.body.generations, [])
+      assert.equal(valid.body.generationEnabled, false)
+      assert.equal(valid.body.generation.enabled, false)
       assert.match(valid.headers.get('cache-control')!, /no-store/)
       assert.equal((await call('GET', '/api/bootstrap', undefined, ownerB)).status, 200)
     })
@@ -160,7 +164,7 @@ test('PostgreSQL project API: auth, isolation, persistence, concurrency and rece
       const otherAsset = await asset(ownerB)
       versionAssetId = await asset(ownerA, 'sheet')
       versionId = randomUUID()
-      await sql`INSERT INTO characters(id, owner_id, document) VALUES ('char_fixture', ${ownerA}, ${sql.json({})})`
+      await sql`INSERT INTO characters(id, owner_id, document) VALUES ('char_fixture', ${ownerA}, ${sql.json({ characterVersionId: versionId, sheetAssetId: versionAssetId })})`
       await sql`INSERT INTO character_versions(id, character_id, owner_id, sheet_asset_id, document)
         VALUES (${versionId}, 'char_fixture', ${ownerA}, ${versionAssetId}, ${sql.json({})})`
       const reference = { id: 'ref', type: 'reference', x: 0, y: 0, name: 'Private image', assetId, assetKind: 'image' }

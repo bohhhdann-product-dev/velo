@@ -27,7 +27,7 @@ async function resolve(action: 'retry' | 'reload' | 'copy') {
     :role="state?.status === 'conflict' || state?.status === 'error' ? 'alert' : 'status'"
   >
     <template v-if="state?.status === 'conflict'">
-      <span>Changed in another session. Your edits are here.</span>
+      <span>{{ state.message || 'Changed in another session. Your edits are here.' }}</span>
       <button :disabled="busy" @click="resolve('reload')">Reload</button>
       <button :disabled="busy" @click="resolve('copy')">Keep a copy</button>
     </template>
@@ -53,11 +53,25 @@ async function resolve(action: 'retry' | 'reload' | 'copy') {
   font-size: 11px;
 }
 .save-status button {
+  flex-shrink: 0;
+  min-height: 32px;
   color: var(--ink);
+  white-space: nowrap;
   text-decoration: underline;
   text-underline-offset: 3px;
 }
 .save-status[role='alert'] {
   color: #dfba9d;
+}
+@media (max-width: 600px) {
+  .save-status[role='alert'] {
+    flex-wrap: wrap;
+    gap: 4px 12px;
+  }
+  .save-status[role='alert'] > span {
+    flex-basis: 100%;
+    line-height: 1.45;
+    overflow-wrap: anywhere;
+  }
 }
 </style>

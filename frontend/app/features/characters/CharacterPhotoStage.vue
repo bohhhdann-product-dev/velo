@@ -14,10 +14,15 @@ const emit = defineEmits<{
   photo: [angle: PhotoAngle, photo: CharacterPhoto | null]
   notes: [text: string]
   approve: []
+  busy: [value: boolean]
 }>()
 const isFace = computed(() => props.stage === 'face')
 const current = computed(() => props.character[props.stage])
 const front = computed(() => current.value.photos.front)
+const uploads = ref<Partial<Record<PhotoAngle, boolean>>>({})
+const uploading = computed(() => Object.values(uploads.value).some(Boolean))
+watch(uploading, (value) => emit('busy', value), { flush: 'sync' })
+onBeforeUnmount(() => emit('busy', false))
 </script>
 <template>
   <div class="character-stage-grid">
@@ -41,6 +46,7 @@ const front = computed(() => current.value.photos.front)
           :required="angle.id === 'front'"
           :body="!isFace"
           @change="emit('photo', angle.id, $event)"
+          @busy="uploads[angle.id] = $event"
         />
       </div>
       <p class="upload-spec">
@@ -60,12 +66,13 @@ const front = computed(() => current.value.photos.front)
         />
       </label>
       <div class="stage-actions">
-        <span v-if="current.approved" class="approved-note"
+        <span v-if="uploading" class="step-requirement" role="status">Uploading photos…</span>
+        <span v-else-if="current.approved" class="approved-note"
           ><Check class="size-3.5" /> Approved</span
         ><span v-else class="step-requirement">{{
           front ? 'Review your references, then continue.' : 'Add the front photo to continue.'
         }}</span
-        ><VButton variant="primary" :disabled="!front" @click="emit('approve')"
+        ><VButton variant="primary" :disabled="!front || uploading" @click="emit('approve')"
           >{{ isFace ? 'Approve face' : 'Approve body' }}<ArrowRight class="size-4"
         /></VButton>
       </div>

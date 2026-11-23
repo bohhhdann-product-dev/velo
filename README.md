@@ -9,9 +9,11 @@ Nuxt 4 serves both the Vue canvas and a Nitro API. Clerk authenticates users, Po
 There are two explicit modes:
 
 - **Demo:** an in-memory design sandbox with sample media and simulated generations.
-- **Live:** authenticated projects, uploads, library, favorites and characters. Generation providers and billing are not connected; the app does not simulate successful generations in live mode.
+- **Live:** authenticated projects, uploads, library, favorites and characters, plus durable BytePlus ModelArk and Voplica generation jobs. Generation stays disabled until server credentials, model access and the worker are configured; the app does not simulate successful results or credit billing in live mode.
 
 No Encore or separate microservices are required.
+
+The generation adapters and worker are implemented. See [ModelArk setup](docs/modelark-setup.md) and [Voplica / MiniMax setup](docs/voplica-setup.md) for activation, supported models and recovery. Character-video requirements differ by provider.
 
 ## Local setup
 
@@ -39,7 +41,9 @@ pnpm db:migrate
 pnpm dev --host 127.0.0.1 --port 3457
 ```
 
-Open http://127.0.0.1:3457. Sign in, create a project, upload a reference and edit its prompt. Reloading should restore the saved board. The status beside the project tells you when changes have reached the server.
+Open http://127.0.0.1:3457 for the public landing. **Try Vela** opens registration; **Log in** opens sign-in. Both remain inside Vela. `/studio` opens your first saved project or creates an empty one after authentication. Upload a reference and edit its prompt; reloading should restore the saved board. The status beside the project tells you when changes have reached the server.
+
+The homepage is prerendered HTML; workspace routes remain client-rendered and protected by the existing session/API checks. See [landing research and acceptance](docs/landing-research.md) for the design rationale and preview limitations.
 
 Secrets belong in the ignored `.env` file or the deployment's secret store. Never add them to source control. For an existing Clerk application, the official CLI can pull keys directly to `.env` after `clerk auth login`; do not provision a replacement application.
 

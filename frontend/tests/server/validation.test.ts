@@ -21,7 +21,7 @@ test('rejects owner claims, arbitrary URLs, invalid coordinates, fake results an
   for (const url of ['blob:private', 'data:image/png;base64,AAAA', 'https://example.com/image.jpg', '/api/assets/x/file']) {
     invalid({ ...project, nodes: [{ id: 'ref', type: 'reference', x: 0, y: 0, name: 'Image', assetId: 'asset', url }] })
   }
-  invalid({ ...project, nodes: [{ id: 'take', type: 'take', x: 0, y: 0, generationId: 'g', takeId: 't' }] })
+  invalid({ ...project, nodes: [{ id: 'take', type: 'take', x: 0, y: 0, generationId: 'g', takeId: 't', url: 'https://fake.example/result' }] })
   invalid({ ...project, title: 'a'.repeat(161) })
   invalid({ ...project, nodes: [{ ...generator, draft: { ...generator.draft, prompt: 'x'.repeat(12_001) } }] })
   invalid({ ...project, nodes: Array.from({ length: 501 }, (_, index) => ({ ...generator, id: `g_${index}` })) })

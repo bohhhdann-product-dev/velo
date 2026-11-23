@@ -1,28 +1,20 @@
 <script setup lang="ts">
+import VelaBrand from '~/shared/ui/VelaBrand.vue'
 import RecoveryNotice from './RecoveryNotice.vue'
 import { createDraftRecovery, type RecoveryDraft } from '~/shared/persistence/recovery'
-import { SignIn, UserButton } from '@clerk/nuxt/components'
+import { UserButton } from '@clerk/nuxt/components'
+import StudioEntrance from '~/features/marketing/StudioEntrance.vue'
 import { useAuth } from '@clerk/nuxt/composables'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { useStudioStore } from '~/stores/studio'
 import { useCharactersStore } from '~/stores/characters'
-import type { LibraryItem, Project } from '~/entities/studio/types'
+import type { LibraryItem, Project, Generation } from '~/entities/studio/types'
+import type { GenerationCapabilities } from '~/entities/studio/generation'
 import type { Character } from '~/entities/character/types'
 const { isLoaded, isSignedIn, userId, sessionId, getToken } = useAuth()
 const workspace = useWorkspaceStore()
 const studio = useStudioStore()
 const characters = useCharactersStore()
-const appearance = {
-  variables: {
-    colorPrimary: '#b6c9bc',
-    colorBackground: '#191c1d',
-    colorText: '#ecece8',
-    colorTextSecondary: '#a4aaa5',
-    colorInputBackground: '#242829',
-    colorInputText: '#ecece8',
-    borderRadius: '10px',
-  },
-}
 const recovery = createDraftRecovery()
 const recoverable = ref<RecoveryDraft[]>([])
 let confirmedUser: string | null = null
@@ -70,7 +62,9 @@ async function load() {
       workspace.request<{
         user: { id: string }
         projects: Project[]
-        generationEnabled: false
+        generations: Generation[]
+        generation: GenerationCapabilities
+        generationEnabled: boolean
       }>('/api/bootstrap'),
       workspace.request<{ assets: LibraryItem[] }>('/api/assets'),
       workspace.request<{ characters: Character[] }>('/api/characters'),
@@ -79,12 +73,18 @@ async function load() {
     if (bootstrap.user.id !== userId.value)
       throw new Error('The workspace account does not match your session.')
     recoverable.value = recovery.list(userId.value!)
-    studio.hydrateLive(bootstrap.projects, assets.assets)
+    studio.hydrateLive(
+      bootstrap.projects,
+      assets.assets,
+      bootstrap.generations,
+      bootstrap.generation,
+    )
     characters.hydrateLive(people.characters)
     ready.value = true
   } catch (cause) {
     if (current === epoch)
-      error.value = cause instanceof Error ? cause.message : 'Could not open your workspace.'
+      error.value =
+        cause instanceof Error ? cause.message : 'Could not open your workspace.'
   }
 }
 watch([isLoaded, isSignedIn, userId, sessionId], load, {
@@ -101,16 +101,22 @@ onBeforeUnmount(() => {
 })
 </script>
 <template>
-  <div v-if="authTimedOut && !isLoaded" class="workspace-gate">
+  <div v-if="authTimedOut && !isLoaded" class="workspace-gate vela-public entrance-loading">
     <p role="alert">
       Sign-in is taking longer than expected. Check your connection and try again.
     </p>
     <button class="gate-retry" @click="retryAuth">Try again</button>
+    <NuxtLink to="/" class="public-link">Back to Vela</NuxtLink>
   </div>
-  <div v-else-if="!isLoaded" class="workspace-gate" role="status">Opening Vela…</div>
-  <div v-else-if="!isSignedIn" class="workspace-gate">
-    <SignIn routing="hash" :appearance="appearance" />
+  <div
+    v-else-if="!isLoaded"
+    class="workspace-gate vela-public entrance-loading"
+    role="status"
+  >
+    <VelaBrand />
+    <p>Opening your studio…</p>
   </div>
+  <StudioEntrance v-else-if="!isSignedIn" />
   <div v-else-if="error" class="workspace-gate">
     <h1>We couldn’t open your workspace</h1>
     <p role="alert">{{ error }}</p>
@@ -122,10 +128,8 @@ onBeforeUnmount(() => {
     <slot :key="userId" />
     <RecoveryNotice
       :drafts="recoverable"
-      @handled="
-        (id, kind) =>
-          (recoverable = recoverable.filter((draft) => draft.id !== id || draft.kind !== kind))
-      "
+      @handled="(key) => (recoverable = recoverable.filter((draft) => draft.key !== key))"
+      @refresh="recoverable = recovery.list(userId!)"
     />
   </template>
 </template>
@@ -145,5 +149,12 @@ onBeforeUnmount(() => {
   padding: 9px 18px;
   border: 1px solid var(--line-strong);
   border-radius: 8px;
+}
+.entrance-loading {
+  background: var(--canvas);
+  color: var(--ink-2);
+}
+.entrance-loading .gate-retry {
+  border-color: var(--line-strong);
 }
 </style>

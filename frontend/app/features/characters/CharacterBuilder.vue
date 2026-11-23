@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ArrowLeft, ArrowRight, Check, ScanFace, PersonStanding, Layers } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import CharacterPhotoStage from './CharacterPhotoStage.vue'
 import CharacterSheet from './CharacterSheet.vue'
 import { characterAsset, useCharacterPlacement } from './useCharacterPlacement'
@@ -9,6 +10,7 @@ import { CHARACTER_STEPS, characterStep, type CharacterStep } from '~/entities/c
 import { mentionAt } from '~/entities/studio/mentions'
 import { useCharactersStore } from '~/stores/characters'
 import { useStudioStore } from '~/stores/studio'
+import { CHARACTER_VIDEO_REASON, capabilitiesForModel } from '~/entities/studio/generation'
 import '~/assets/css/characters.css'
 const props = defineProps<{ id: string }>()
 const characters = useCharactersStore()
@@ -21,7 +23,7 @@ const step = shallowRef<CharacterStep>(
 const error = shallowRef('')
 const page = useTemplateRef<HTMLElement>('page')
 const heading = useTemplateRef<HTMLElement>('heading')
-const { useInVideo } = useCharacterPlacement()
+const { useInVideo, useInImage } = useCharacterPlacement()
 const furthest = computed(() =>
   character.value
     ? CHARACTER_STEPS.findIndex((s) => s.id === characterStep(character.value!))
@@ -36,6 +38,7 @@ const returnProject = computed(() =>
 const returnGenerator = computed(() =>
   returnProject.value?.nodes.find((n) => n.id === route.query.node && n.type === 'generator'),
 )
+const characterUseBlocked = computed(() => studio.live && returnGenerator.value?.type === 'generator' && returnGenerator.value.draft.mode === 'video' && !capabilitiesForModel(studio.generationCapabilities, returnGenerator.value.draft).characterVideo ? CHARACTER_VIDEO_REASON : '')
 watch(step, async () => {
   error.value = ''
   await nextTick()
@@ -43,7 +46,27 @@ watch(step, async () => {
   heading.value?.focus({ preventScroll: true })
 })
 const pending = shallowRef(false)
+const uploading = shallowRef(false)
 const saveState = computed(() => characters.saveStates[props.id])
+const draftStatus = computed(() => {
+  if (!characters.live) return 'Draft · This session'
+  if (uploading.value) return 'Draft · Uploading photos…'
+  switch (saveState.value?.status) {
+    case 'saved': return 'Draft · Saved'
+    case 'saving': return 'Draft · Saving…'
+    case 'conflict': return 'Draft · Needs review'
+    case 'error': return 'Draft · Could not save'
+    default: return 'Draft · Unsaved changes'
+  }
+})
+function waitForUpload(event?: Event) {
+  if (!uploading.value) return true
+  event?.preventDefault()
+  toast('Wait for your photos to finish uploading before leaving this step.')
+  return false
+}
+onBeforeRouteLeave(() => waitForUpload())
+onBeforeRouteUpdate(() => waitForUpload())
 async function nextIdentity() {
   error.value = characters.identityError(props.id)
   if (error.value || pending.value) return
@@ -58,7 +81,7 @@ async function nextIdentity() {
   }
 }
 async function approve() {
-  if (!photoStage.value || pending.value) return
+  if (!photoStage.value || pending.value || uploading.value) return
   const stage = photoStage.value
   pending.value = true
   error.value = ''
@@ -112,6 +135,7 @@ function saved() {
     <div v-if="character" class="character-builder">
       <header class="character-header">
         <NuxtLink :to="{ path: '/characters', query: route.query }" class="character-back"
+          :aria-disabled="uploading || undefined" @click="waitForUpload"
           ><ArrowLeft class="size-3.5" /> Characters</NuxtLink
         >
         <div class="character-title-row">
@@ -121,21 +145,18 @@ function saved() {
               ><i :class="{ saved: character.savedAt }" />{{
                 character.savedAt
                   ? 'Saved to your library'
-                  : characters.live
-                    ? saveState?.status === 'saved'
-                      ? 'Draft · Saved'
-                      : 'Draft · Saving…'
-                    : 'Draft · This session'
+                  : draftStatus
               }}</span
             >
           </div>
           <NuxtLink v-if="returnProject" :to="`/p/${returnProject.id}`" class="character-back"
+            :aria-disabled="uploading || undefined" @click="waitForUpload"
             >Back to canvas<ArrowRight class="size-3.5"
           /></NuxtLink>
         </div>
       </header>
       <p v-if="saveState?.status === 'conflict'" role="alert" class="character-error">
-        Changed in another session. Your edits are still here.
+        {{ saveState.message || 'Changed in another session. Your edits are still here.' }}
         <button class="underline" @click="resolveSave(true)">Reload saved character</button>
       </p>
       <p v-else-if="saveState?.status === 'error'" role="alert" class="character-error">
@@ -150,7 +171,7 @@ function saved() {
           v-for="(item, index) in CHARACTER_STEPS"
           :key="item.id"
           :aria-current="step === item.id ? 'step' : undefined"
-          :disabled="index > furthest"
+          :disabled="index > furthest || uploading || pending || characters.busy[id]"
           @click="step = item.id"
         >
           <span
@@ -172,8 +193,7 @@ function saved() {
               <p class="character-eyebrow">Made from you</p>
               <h2>Your character starts<br />with your own photos.</h2>
               <p class="identity-description">
-                Keep your face, proportions and details together. Save once, then bring yourself
-                into any scene with a single @mention.
+                {{ studio.live ? 'Keep your reviewed references together for image generation with @mentions. Video requires separate identity authorization, which is not available here yet.' : 'Keep your face, proportions and details together. Save once, then bring yourself into any scene with a single @mention.' }}
               </p>
               <form @submit.prevent="nextIdentity">
                 <label class="character-field"
@@ -254,6 +274,7 @@ function saved() {
             :character="character"
             :stage="photoStage"
             @photo="(angle, photo) => characters.setPhoto(id, photoStage!, angle, photo)"
+            @busy="uploading = $event"
             @notes="characters.updateNotes(id, photoStage!, $event)"
             @approve="approve"
           />
@@ -261,8 +282,10 @@ function saved() {
             v-else
             :character="character"
             :returning="!!returnGenerator"
+            :use-blocked-reason="characterUseBlocked"
             @saved="saved"
             @use-video="useInVideo(character)"
+            @use-image="useInImage(character)"
             @edit="step = $event"
           />
         </div>
@@ -286,6 +309,7 @@ function saved() {
 .character-back {
   display: inline-flex;
   align-items: center;
+  min-height: 36px;
   gap: 7px;
   color: var(--ink-3);
   font-size: 12px;

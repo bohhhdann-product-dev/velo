@@ -1,8 +1,11 @@
 import { defineStore } from 'pinia'
 import { computed, ref } from 'vue'
+import { toast } from 'vue-sonner'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { useProjectPersistence } from '~/shared/persistence/useProjectPersistence'
 import { projectPayload } from '~/shared/persistence/projectPayload'
+import { requiresReload } from '~/shared/api/workspace'
+import { photoFileError } from '~/entities/character/sheet'
 import type {
   CanvasEdge,
   CanvasNode,
@@ -27,6 +30,7 @@ import {
   insertMention,
 } from '~/entities/studio/mentions'
 import { mockImageUrl, mockVideo } from '~/entities/studio/mockMedia'
+import { CHARACTER_VIDEO_REASON, GENERATION_UNCONFIGURED, capabilitiesForModel, normalizeModelDraft, preferredVideoModel, type GenerationCapabilities } from '~/entities/studio/generation'
 
 /* Canvas editing is shared by demo and live workspaces. Only demo mode runs
    the simulated generation lifecycle; live documents use the save coordinator. */
@@ -49,22 +53,153 @@ export const useStudioStore = defineStore('studio', () => {
   const projects = ref<Project[]>([])
   const generations = ref<Generation[]>([])
   const library = ref<LibraryItem[]>([])
+  const generationCapabilities = ref<GenerationCapabilities>({ ...GENERATION_UNCONFIGURED })
+  function generatorDraft(mode?: Mode): Draft {
+    if (!workspace.live) return { ...defaultDraft(), mode: mode ?? 'image', modelId: mode === 'video' ? 'seedance-2-5' : 'seedream-5-pro' }
+    const caps = generationCapabilities.value
+    const video = preferredVideoModel(caps)
+    const selectedMode = mode ?? (capabilitiesForModel(caps, { modelId: caps.imageModel }).enabled || !video ? 'image' : 'video')
+    return normalizeModelDraft({ ...defaultDraft(), mode: selectedMode, modelId: selectedMode === 'image' ? caps.imageModel : video ?? caps.videoModels[0] ?? 'seedance-2-5' }, caps)
+  }
+  function referenceLimit(draft: Draft) {
+    const caps = capabilitiesForModel(generationCapabilities.value, draft)
+    return workspace.live ? (draft.mode === 'image' ? caps.maxImageReferences : caps.maxVideoReferences) : draft.mode === 'image' ? 6 : videoModel(draft).maxReferences
+  }
+  const generationSubmissions = ref<Record<string, { status: 'submitting' | 'unconfirmed' | 'error' | 'expired'; message?: string }>>({})
+  const generationPollError = ref('')
+  const favoritePending = ref<Record<string, boolean>>({})
+  let generationTimer: ReturnType<typeof setTimeout> | undefined
+  let generationEpoch = 0
+  let generationRequest = 0
+  const copySnapshots = new Map<string, ReturnType<typeof projectPayload>>()
   const persistence = useProjectPersistence(projects)
   const saveStates = persistence.states
   const reloads = persistence.reloads
-  function hydrateLive(loaded: Project[], assets: LibraryItem[]) {
+  function hydrateLive(loaded: Project[], assets: LibraryItem[], jobs: Generation[] = [], capabilities = GENERATION_UNCONFIGURED) {
+    stopGenerationPolling()
+    persistence.reset()
+    copySnapshots.clear()
     projects.value = loaded
     library.value = assets
     credits.value = 0
+    generations.value = jobs
+    generationCapabilities.value = { ...capabilities }
+    generationSubmissions.value = {}
     persistence.start()
+    scheduleGenerationPoll()
   }
   function resetPrivate() {
+    stopGenerationPolling()
     persistence.reset()
+    copySnapshots.clear()
     projects.value = []
     generations.value = []
     library.value = []
     history.value = {}
     credits.value = workspace.live ? 0 : 500
+    generationSubmissions.value = {}
+    favoritePending.value = {}
+    generationCapabilities.value = { ...GENERATION_UNCONFIGURED }
+  }
+  function stopGenerationPolling() {
+    generationEpoch++
+    clearTimeout(generationTimer)
+    generationPollError.value = ''
+  }
+  function upsertGeneration(incoming: Generation) {
+    const existing = generations.value.find((item) => item.id === incoming.id)
+    if (!existing) { generations.value.unshift(incoming); return incoming }
+    const takes = incoming.takes.map((take) => {
+      const current = existing.takes.find((item) => item.id === take.id)
+      return current ? Object.assign(current, take) : take
+    })
+    Object.assign(existing, incoming, { takes })
+    return existing
+  }
+  function scheduleGenerationPoll() {
+    clearTimeout(generationTimer)
+    if (workspace.live && generations.value.some((job) => job.takes.some((take) => ['queued', 'running'].includes(take.status))))
+      generationTimer = setTimeout(() => void refreshGenerations(), 3000)
+  }
+  async function refreshGenerations() {
+    if (!workspace.live) return
+    const session = workspace.sessionVersion, epoch = generationEpoch, request = ++generationRequest
+    try {
+      const result = await workspace.request<{ generations: Generation[] }>('/api/generations')
+      workspace.assertSession(session)
+      if (epoch !== generationEpoch || request !== generationRequest) return
+      result.generations.forEach(upsertGeneration)
+      generationPollError.value = ''
+    } catch (cause) {
+      if (session !== workspace.sessionVersion || epoch !== generationEpoch || request !== generationRequest) return
+      generationPollError.value = 'Could not refresh generation status. Checking again shortly.'
+    }
+    scheduleGenerationPoll()
+  }
+  function generationBlocked(projectId: string, generatorId: string) {
+    const target = project(projectId)
+    const node = target?.nodes.find((item): item is GeneratorNode => item.id === generatorId && item.type === 'generator')
+    if (!node || !target) return 'Generator not found.'
+    const draft = node.draft, caps = capabilitiesForModel(generationCapabilities.value, draft)
+    const references = target.edges.filter((edge) => edge.to === generatorId)
+    if (draft.mode === 'video' && references.some((edge) => target.nodes.some((item) => item.id === edge.from && item.type === 'reference' && item.assetKind === 'character')) && !caps.characterVideo)
+      return CHARACTER_VIDEO_REASON
+    if (!caps.enabled) return caps.reason || 'This model is not connected yet.'
+    if (generations.value.some((job) => job.projectId === projectId && job.generatorId === generatorId && job.takes.some((take) => take.status === 'unknown')))
+      return 'A previous provider outcome is unconfirmed. Check its status before starting another generation.'
+    if (activeCount(projectId, generatorId)) return 'Generation in progress'
+    if (!(draft.mode === 'image' ? [caps.imageModel] : caps.videoModels).includes(draft.modelId)) return 'Choose a supported model.'
+    if (!caps.aspects.includes(draft.aspect) || !caps.counts.includes(draft.count)) return 'Choose a supported format and output count.'
+    if (draft.trial && !caps.trial) return 'Trial generation is unavailable. Turn off trial to continue.'
+    if (draft.mode === 'video' && (draft.durationS < caps.videoDuration.min || draft.durationS > caps.videoDuration.max || (draft.durationS - caps.videoDuration.min) % caps.videoDuration.step !== 0)) return 'Choose a supported duration.'
+    if (draft.mode === 'image' ? !caps.imageQualities.includes(draft.imageQuality) : !caps.videoQualities.includes(draft.videoQuality)) return 'Choose a supported quality.'
+    if (draft.mode === 'image' && !draft.prompt.trim()) return 'Add a prompt describing the image to create.'
+    if (!draft.prompt.trim() && !references.length) return 'Add a prompt or reference first.'
+    if (references.some((edge) => !sourceMedia(projectId, edge.from))) return 'A connected reference is not available yet.'
+    const frames = references.filter((edge) => edge.slot)
+    if (frames.length && !caps.referenceModes.includes('start-end')) return 'This model does not support start/end frames.'
+    if (references.some((edge) => !edge.slot) && !caps.referenceModes.includes('images')) return 'This model does not support reference images.'
+    if (frames.some((edge) => edge.slot === 'end') && !frames.some((edge) => edge.slot === 'start')) return 'Add a start image first.'
+    if (frames.length && references.some((edge) => !edge.slot)) return 'Use reference images or start/end frames, not both.'
+    const limit = draft.mode === 'image' ? caps.maxImageReferences : caps.maxVideoReferences
+    if (references.filter((edge) => !edge.slot).length > limit) return `Remove extra references (maximum ${limit}).`
+    return promptReferenceError(projectId, generatorId, draft.prompt) || ''
+  }
+  async function generateFromNodeAsync(projectId: string, generatorId: string) {
+    if (!workspace.live) return generateFromNode(projectId, generatorId)
+    const session = workspace.sessionVersion
+    const key = `generation:${projectId}:${generatorId}`
+    if (generationSubmissions.value[generatorId]?.status === 'submitting') return
+    const replay = workspace.hasPendingMutation(key)
+    if (!replay) {
+      const blocked = generationBlocked(projectId, generatorId)
+      if (blocked) throw new Error(blocked)
+    }
+    generationSubmissions.value[generatorId] = { status: 'submitting' }
+    let held = false
+    try {
+      if (!replay) await persistence.flush(projectId)
+      workspace.assertSession(session)
+      persistence.hold(projectId)
+      held = true
+      const result = await workspace.mutate<{ generation: Generation; project: Project }>(key, `/api/projects/${projectId}/generations`, {
+        method: 'POST', body: { generatorId, expectedRevision: project(projectId)?.revision, clientMutationId: crypto.randomUUID() },
+      })
+      workspace.assertSession(session)
+      upsertGeneration(result.generation)
+      persistence.mergeGeneration(result.project, result.generation.id)
+      delete generationSubmissions.value[generatorId]
+      scheduleGenerationPoll()
+    } catch (cause) {
+      workspace.assertSession(session)
+      const retained = workspace.hasPendingMutation(key)
+      generationSubmissions.value[generatorId] = {
+        status: requiresReload(cause) ? 'expired' : retained ? 'unconfirmed' : 'error',
+        message: cause instanceof Error ? cause.message : 'Could not submit generation.',
+      }
+      if (held && !retained) persistence.release(projectId)
+      throw cause
+    }
   }
   async function createProjectAsync(
     title?: string,
@@ -85,7 +220,7 @@ export const useStudioStore = defineStore('studio', () => {
               type: 'generator',
               x: 120,
               y: 160,
-              draft: defaultDraft(),
+              draft: generatorDraft(),
             },
           ],
           edges: [],
@@ -112,14 +247,23 @@ export const useStudioStore = defineStore('studio', () => {
   async function deleteProjectAsync(id: string) {
     const session = workspace.sessionVersion
     if (workspace.live) {
-      await persistence.flush(id)
-      await workspace.mutate(`project:delete:${id}`, `/api/projects/${id}`, {
-        method: 'DELETE',
-        body: {
-          expectedRevision: project(id)?.revision,
-          clientMutationId: crypto.randomUUID(),
-        },
-      })
+      const key = `project:delete:${id}`
+      if (!workspace.hasPendingMutation(key)) await persistence.flush(id)
+      workspace.assertSession(session)
+      persistence.hold(id)
+      try {
+        await workspace.mutate(key, `/api/projects/${id}`, {
+          method: 'DELETE',
+          body: {
+            expectedRevision: project(id)?.revision,
+            clientMutationId: crypto.randomUUID(),
+          },
+        })
+      } catch (cause) {
+        workspace.assertSession(session)
+        if (!workspace.hasPendingMutation(key)) persistence.release(id)
+        throw cause
+      }
     }
     workspace.assertSession(session)
     persistence.remove(id)
@@ -128,26 +272,67 @@ export const useStudioStore = defineStore('studio', () => {
   }
   async function reloadProject(id: string) {
     await persistence.reload(id)
+    for (const node of project(id)?.nodes ?? []) if (node.type === 'generator') {
+      workspace.forgetMutation(`generation:${id}:${node.id}`)
+      delete generationSubmissions.value[node.id]
+    }
     delete history.value[id]
+    if (workspace.live) await refreshGenerations()
   }
   async function keepProjectCopy(id: string) {
     const source = project(id)
     if (!source) throw new Error('Project not found.')
-    return createProjectAsync(`${source.title} (copy)`, source, `project:copy:${id}`)
+    const session = workspace.sessionVersion
+    const key = `project:copy:${id}`
+    if (!workspace.hasPendingMutation(key)) copySnapshots.set(id, projectPayload(source))
+    const snapshot = copySnapshots.get(id)
+    try {
+      const copy = await createProjectAsync(`${source.title} (copy)`, source, key)
+      // A receipt retry can confirm an older copy. Only its original snapshot
+      // permits reconciling the source; edits during POST or GET stay recoverable.
+      if (workspace.live && snapshot && copySnapshots.get(id) === snapshot) {
+        try {
+          if (await persistence.reload(id, snapshot)) delete history.value[id]
+        } catch {
+          workspace.assertSession(session)
+          toast('Copy saved. Reload the original canvas to resolve its save status.')
+        }
+      }
+      return copy
+    } finally {
+      if (!workspace.hasPendingMutation(key) && copySnapshots.get(id) === snapshot)
+        copySnapshots.delete(id)
+    }
   }
   async function uploadLibraryItem(file: File) {
+    const error = photoFileError(file)
+    if (error) throw new Error(error)
     if (!workspace.live)
       return addLibraryItem(URL.createObjectURL(file), file.name.replace(/\.[^.]+$/, ''))
     const session = workspace.sessionVersion
+    const hash = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+    workspace.assertSession(session)
+    const digest = Array.from(new Uint8Array(hash), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    const key = `asset:upload:${digest}:${JSON.stringify([file.name, file.type])}`
     const body = new FormData()
     body.append('file', file)
-    const { asset } = await workspace.request<{ asset: LibraryItem }>('/api/assets', {
-      method: 'POST',
-      body,
-    })
-    workspace.assertSession(session)
-    library.value.unshift(asset)
-    return asset
+    body.append('clientMutationId', crypto.randomUUID())
+    try {
+      const { asset } = await workspace.mutate<{ asset: LibraryItem }>(key, '/api/assets', {
+        method: 'POST',
+        body,
+      })
+      workspace.assertSession(session)
+      const existing = library.value.find((item) => item.id === asset.id)
+      if (existing) return existing
+      library.value.unshift(asset)
+      return asset
+    } catch (cause) {
+      workspace.assertSession(session)
+      if (workspace.hasPendingMutation(key) && !requiresReload(cause))
+        throw new Error(`Could not confirm the upload of “${file.name}”. Select the same file again to retry.`, { cause })
+      throw cause
+    }
   }
   async function toggleAssetFavorite(id: string) {
     const session = workspace.sessionVersion
@@ -212,7 +397,9 @@ export const useStudioStore = defineStore('studio', () => {
     if (n?.type !== 'generator') return
     checkpoint(id)
     Object.assign(n.draft, patch)
-    n.draft.durationS = Math.min(n.draft.durationS, videoModel(n.draft).maxDuration)
+    if (workspace.live) {
+      if (patch.modelId !== undefined || patch.mode !== undefined) Object.assign(n.draft, normalizeModelDraft(n.draft, generationCapabilities.value))
+    } else n.draft.durationS = Math.min(n.draft.durationS, videoModel(n.draft).maxDuration)
   }
 
   /* ------------------------------ projects ------------------------------- */
@@ -240,12 +427,12 @@ export const useStudioStore = defineStore('studio', () => {
 
   function renameProject(id: string, title: string) {
     const target = project(id)
-    if (target && title.trim()) target.title = title.trim()
+    if (target && title.trim()) target.title = title.trim().slice(0, 160)
   }
 
   function deleteProject(id: string) {
     projects.value = projects.value.filter((p) => p.id !== id)
-    generations.value = generations.value.filter((g) => g.projectId !== id)
+    generations.value = generations.value.filter((g) => g.projectId !== id || projects.value.some((p) => p.nodes.some((node) => node.type === 'take' && node.generationId === g.id)))
   }
 
   /* ------------------------------- canvas -------------------------------- */
@@ -392,14 +579,17 @@ export const useStudioStore = defineStore('studio', () => {
       !!target?.edges.some((e) => e.from === existing.id && e.to === generatorId && !e.slot)
     let disabled = ''
     if (!target || generator?.type !== 'generator') disabled = 'Generator not found.'
+    else if (workspace.live && generator.draft.mode === 'video' && asset.kind === 'character' && !capabilitiesForModel(generationCapabilities.value, generator.draft).characterVideo)
+      disabled = CHARACTER_VIDEO_REASON
+    else if (workspace.live && !capabilitiesForModel(generationCapabilities.value, generator.draft).referenceModes.includes('images'))
+      disabled = 'This model does not support reference images.'
     else if (!connected && target.edges.some((e) => e.to === generatorId && e.slot))
       disabled = 'Disconnect start/end frames to use character or image references.'
     else if (existing)
       disabled = connected ? '' : (connectionError(projectId, existing.id, generatorId) ?? '')
     else {
       const inputs = target.edges.filter((e) => e.to === generatorId)
-      const limit =
-        generator.draft.mode === 'image' ? 6 : videoModel(generator.draft).maxReferences
+      const limit = referenceLimit(generator.draft)
       if (inputs.some((e) => e.slot))
         disabled = 'Disconnect start/end frames to use character or image references.'
       else if (inputs.length >= limit)
@@ -460,6 +650,7 @@ export const useStudioStore = defineStore('studio', () => {
   }
   function sourceMedia(projectId: string, nodeId: string) {
     const node = project(projectId)?.nodes.find((n) => n.id === nodeId)
+    if (workspace.live && node?.type === 'reference' && !node.assetId) return null
     if (node?.type === 'reference')
       return {
         id: node.id,
@@ -469,7 +660,7 @@ export const useStudioStore = defineStore('studio', () => {
       }
     if (node?.type !== 'take') return null
     const found = findTake(node.takeId)
-    if (!found || found.take.status !== 'done') return null
+    if (!found || found.take.status !== 'done' || (workspace.live && !found.take.assetId)) return null
     const url = found.generation.draft.mode === 'image' ? found.take.url : found.take.posterUrl
     return url
       ? {
@@ -491,8 +682,14 @@ export const useStudioStore = defineStore('studio', () => {
     const to = target?.nodes.find((n) => n.id === toId)
     if (!target || !sourceMedia(projectId, fromId) || to?.type !== 'generator')
       return 'Connect an image or a finished result to a generator.'
+    const source = target.nodes.find((node) => node.id === fromId)
+    const caps = capabilitiesForModel(generationCapabilities.value, to.draft)
+    if (workspace.live && to.draft.mode === 'video' && source?.type === 'reference' && source.assetKind === 'character' && !caps.characterVideo)
+      return CHARACTER_VIDEO_REASON
     if (slot && to.draft.mode !== 'video')
       return 'Frame inputs are only available on video generators.'
+    if (workspace.live && !caps.referenceModes.includes(slot ? 'start-end' : 'images'))
+      return slot ? 'This model does not support start/end frames.' : 'This model does not support reference images.'
     const seen = new Set<string>()
     const reachesSource = (id: string): boolean => {
       if (id === fromId) return true
@@ -507,7 +704,7 @@ export const useStudioStore = defineStore('studio', () => {
       (slot ? other.some((e) => !e.slot) : other.some((e) => e.slot))
     )
       return 'Use references or start/end frames. Disconnect the other inputs first.'
-    const limit = to.draft.mode === 'image' ? 6 : videoModel(to.draft).maxReferences
+    const limit = referenceLimit(to.draft)
     if (!slot && other.filter((e) => !e.slot).length >= limit)
       return `This model accepts up to ${limit} references.`
     return null
@@ -741,11 +938,7 @@ export const useStudioStore = defineStore('studio', () => {
       id: makeId('node'),
       type: 'generator',
       number,
-      draft: {
-        ...defaultDraft(),
-        mode,
-        modelId: mode === 'image' ? 'seedream-5-pro' : 'seedance-2-5',
-      },
+      draft: generatorDraft(mode),
       x,
       y,
     }
@@ -931,7 +1124,23 @@ export const useStudioStore = defineStore('studio', () => {
 
   function toggleFavorite(takeId: string) {
     const found = findTake(takeId)
-    if (found) found.take.favorite = !found.take.favorite
+    if (!found || favoritePending.value[takeId]) return
+    if (!workspace.live) { found.take.favorite = !found.take.favorite; return }
+    const session = workspace.sessionVersion
+    favoritePending.value[takeId] = true
+    void workspace.request<{ generation: Generation }>(`/api/generations/${found.generation.id}/takes/${takeId}`, {
+      method: 'PATCH', body: { favorite: !found.take.favorite },
+    }).then((result) => {
+      workspace.assertSession(session)
+      const canonical = result.generation.takes.find((take) => take.id === takeId)
+      const current = findTake(takeId)?.take
+      if (canonical && current) current.favorite = canonical.favorite
+      // Discard a poll begun before this acknowledgement, which may carry the old favorite.
+      generationRequest++
+      scheduleGenerationPoll()
+    }).catch((cause) => {
+      if (session === workspace.sessionVersion) toast.error(cause instanceof Error ? cause.message : 'Could not update favorite.')
+    }).finally(() => { if (session === workspace.sessionVersion) delete favoritePending.value[takeId] })
   }
 
   /* ------------------------------- library ------------------------------- */
@@ -1052,6 +1261,13 @@ export const useStudioStore = defineStore('studio', () => {
   }
 
   return {
+    generationCapabilities,
+    generationSubmissions,
+    generationPollError,
+    favoritePending,
+    generationBlocked,
+    generateFromNodeAsync,
+    refreshGenerations,
     toggleAssetFavorite,
     live,
     hydrateLive,

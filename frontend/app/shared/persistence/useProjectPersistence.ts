@@ -7,7 +7,7 @@ import { createSaveQueue, type SaveState } from './saveQueue'
 
 export function useProjectPersistence(projects: Ref<Project[]>) {
   const workspace = useWorkspaceStore()
-  const recovery = createDraftRecovery()
+  let recovery = createDraftRecovery()
   const states = ref<Record<string, SaveState>>({})
   const reloads = ref<Record<string, number>>({})
   let queue:
@@ -40,6 +40,7 @@ export function useProjectPersistence(projects: Ref<Project[]>) {
   }
   function start() {
     reset()
+    recovery = createDraftRecovery()
     queue = createSaveQueue({
       async write(id, value, expectedRevision, clientMutationId) {
         const result = await workspace.request<{ project: Project }>(`/api/projects/${id}`, {
@@ -51,6 +52,9 @@ export function useProjectPersistence(projects: Ref<Project[]>) {
       revision: (project) => project.revision ?? 0,
       dirty(id, payload, revision) {
         if (workspace.userId) recovery.save(workspace.userId, 'project', id, payload, revision)
+      },
+      clean(id) {
+        if (workspace.userId) recovery.remove(workspace.userId, 'project', id)
       },
       saved(id, saved, _sent, unchanged) {
         if (unchanged && workspace.userId) recovery.remove(workspace.userId, 'project', id)
@@ -70,15 +74,42 @@ export function useProjectPersistence(projects: Ref<Project[]>) {
     states.value = {}
     reloads.value = {}
   }
-  async function reload(id: string) {
+  async function reload(id: string, expectedPayload?: ReturnType<typeof projectPayload>) {
     const session = workspace.sessionVersion
+    const activeQueue = queue
+    const expected = expectedPayload === undefined ? undefined : JSON.stringify(expectedPayload)
+    const unchanged = () => {
+      if (queue !== activeQueue) return false
+      if (expected === undefined) return true
+      const current = projects.value.find((p) => p.id === id)
+      return current !== undefined && JSON.stringify(projectPayload(current)) === expected
+    }
+    if (!unchanged()) return false
     const { project } = await workspace.request<{ project: Project }>(`/api/projects/${id}`)
     workspace.assertSession(session)
+    if (!unchanged()) return false
+    workspace.forgetMutation(`project:delete:${id}`)
     register(project)
     if (workspace.userId) recovery.remove(workspace.userId, 'project', id)
     const index = projects.value.findIndex((p) => p.id === id)
     if (index !== -1) projects.value[index] = project
     reloads.value[id] = (reloads.value[id] ?? 0) + 1
+    return true
+  }
+  function mergeGeneration(canonical: Project, generationId: string) {
+    const local = projects.value.find((p) => p.id === canonical.id)
+    if (!local) return
+    // A generation appends outputs on the server; keep edits made while it was accepted.
+    register(canonical)
+    local.revision = canonical.revision
+    const outputs = canonical.nodes.filter((node) => node.type === 'take' && node.generationId === generationId)
+    for (const node of outputs) if (!local.nodes.some((current) => current.id === node.id)) local.nodes.push(node)
+    const outputIds = new Set(outputs.map((node) => node.id))
+    for (const edge of canonical.edges) {
+      if (outputIds.has(edge.to) && local.nodes.some((node) => node.id === edge.from)
+        && !local.edges.some((current) => current.id === edge.id)) local.edges.push(edge)
+    }
+    queue?.update(local.id, projectPayload(local))
   }
   return {
     states,
@@ -87,8 +118,11 @@ export function useProjectPersistence(projects: Ref<Project[]>) {
     register,
     reset,
     reload,
+    mergeGeneration,
     flush: (id: string) => queue?.flush(id),
     retry: (id: string) => queue?.retry(id),
+    hold: (id: string) => queue?.hold(id),
+    release: (id: string) => queue?.release(id),
     remove: (id: string) => {
       queue?.remove(id)
       if (workspace.userId) recovery.remove(workspace.userId, 'project', id)

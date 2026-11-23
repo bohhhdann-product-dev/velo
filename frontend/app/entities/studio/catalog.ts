@@ -26,6 +26,13 @@ export const COUNTS = [1, 2, 3, 4]
 
 export const DURATION = { min: 4, max: 12, step: 2, default: 6 }
 
+/** Live limits and availability come from the server; these are display names only. */
+export const LIVE_VIDEO_MODELS = [
+  { value: 'seedance-2-5', label: 'Seedance 2.5' },
+  { value: 'minimax-h3', label: 'MiniMax H3' },
+  { value: 'h3-eros-max', label: 'H3 Eros Max · Beta7' },
+]
+
 /** credits per unit */
 const IMAGE_PRICE: Record<ImageQuality, number> = { '1k': 2, '2k': 4 }
 export const VIDEO_MODELS = [
