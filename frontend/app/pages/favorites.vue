@@ -10,9 +10,9 @@ const studio = useStudioStore()
 
 onMounted(() => studio.seed())
 
-const favoriteAssets = computed(() => studio.library.filter((item) => item.favorite))
+const favoriteAssets = computed(() => studio.live ? studio.library.filter((item) => item.favorite && !entries.value.some((entry) => entry.take.assetId === item.id)) : [])
 const favoriteCount = computed(() =>
-  studio.live ? favoriteAssets.value.length : entries.value.length,
+  favoriteAssets.value.length + entries.value.length,
 )
 const entries = computed(() =>
   studio.favorites
@@ -41,32 +41,33 @@ function openViewer(entry: { take: Take; generation: Generation }) {
           Favorites<span>{{ favoriteCount }}</span>
         </h1>
         <p class="collection-description">
-          The ideas worth keeping. Your saved images and video, together.
+          Your saved references and generated results, together.
         </p>
       </div>
     </header>
     <div class="collection-section">
-      <span>Saved creations</span
+      <span>Saved media</span
       ><span>{{ favoriteCount }} {{ favoriteCount === 1 ? 'item' : 'items' }}</span>
     </div>
 
-    <div v-if="studio.live && favoriteAssets.length" class="collection-grid">
+    <div v-if="favoriteCount" class="collection-grid">
       <article v-for="item in favoriteAssets" :key="item.id" class="library-card">
         <div class="library-media">
-          <img :src="item.url" :alt="item.name" loading="lazy" />
+          <video v-if="item.mediaType === 'video'" :src="item.url" :poster="item.posterUrl ?? undefined" controls preload="metadata" :aria-label="item.name" />
+          <img v-else :src="item.url" :alt="item.name" loading="lazy" />
           <AssetFavoriteButton :id="item.id" :favorite="item.favorite" />
         </div>
         <div class="library-caption">
           <span>{{ item.name }}</span>
         </div>
       </article>
-    </div>
-    <div v-else-if="!studio.live && entries.length > 0" class="collection-grid">
       <TakeCard
         v-for="entry in entries"
         :key="entry.take.id"
         :take="entry.take"
         :generation="entry.generation"
+        :live="studio.live"
+        :favorite-pending="studio.favoritePending[entry.take.id]"
         @open="openViewer(entry)"
         @favorite="studio.toggleFavorite(entry.take.id)"
         @retry="studio.retryTake(entry.take.id)"
@@ -80,7 +81,7 @@ function openViewer(entry: { take: Take; generation: Generation }) {
       <p class="text-[14px] text-ink-2">
         {{
           studio.live
-            ? 'Tap the heart on a library image to keep it here.'
+            ? 'Tap the heart on a library image or generated result to keep it here.'
             : 'Tap the heart on any take to keep it here.'
         }}
       </p>

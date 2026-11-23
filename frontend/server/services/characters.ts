@@ -3,8 +3,9 @@ import sharp, { type OverlayOptions } from 'sharp'
 import type postgres from 'postgres'
 import { getDb } from '../utils/db'
 import { ASSET_ID, MAX_IMAGE_PIXELS, assetIsUsed, assetUrl, fail, lockOwner, ownedAsset, persistImage,
-  rollbackFiles, withImageSlot, type Db, type NormalizedImage } from './media'
+  rollbackFiles, withImageSlot, retireUnusedVersions, type Db, type NormalizedImage } from './media'
 import { getStorage } from './storage'
+import { replayReceipt } from './mutation-receipts'
 
 const ANGLES = ['front', 'left', 'right', 'extra'] as const
 type Angle = typeof ANGLES[number]
@@ -58,8 +59,10 @@ export function editCharacterDocument(current: CharacterDocument, input: unknown
   const nextIdentity = identity(value)
   const face = photoStage(value.face)
   const body = photoStage(value.body)
-  const faceChanged = JSON.stringify(face) !== JSON.stringify({ photos: current.face.photos, notes: current.face.notes })
-  const bodyChanged = JSON.stringify(body) !== JSON.stringify({ photos: current.body.photos, notes: current.body.notes })
+  const changedStage = (next: Pick<PhotoStage, 'photos' | 'notes'>, previous: PhotoStage) =>
+    next.notes !== previous.notes || ANGLES.some((angle) => next.photos[angle]?.assetId !== previous.photos[angle]?.assetId)
+  const faceChanged = changedStage(face, current.face)
+  const bodyChanged = changedStage(body, current.body)
   const changed = faceChanged || bodyChanged || nextIdentity.name !== current.name || nextIdentity.handle !== current.handle
   return { ...current, ...nextIdentity,
     face: { ...face, approved: current.face.approved && !faceChanged },
@@ -125,20 +128,21 @@ async function mutateCharacter(ownerId: string, id: string, request: Mutation, p
   try {
     return await getDb().begin(async (tx) => {
       await lockOwner(tx, ownerId)
-      const row = await ownedCharacter(tx, ownerId, id)
       if (key) {
-        const [receipt] = await tx`SELECT request_hash, response FROM character_mutations
+        const [receipt] = await tx`SELECT request_hash, response, created_at > now() - interval '7 days' AS replayable FROM character_mutations
           WHERE owner_id = ${ownerId} AND character_id = ${id} AND mutation_id = ${key}`
         if (receipt) {
           if (receipt.request_hash !== requestHash) fail(409, 'mutation_id_reused', 'This mutation ID was already used for a different request')
-          return receipt.response
+          return replayReceipt(receipt.response, receipt.replayable)
         }
       }
+      const row = await ownedCharacter(tx, ownerId, id)
       assertCharacterRevision(row, request.expectedRevision)
       const document = await work(tx, row)
       const [updated] = await tx<CharacterRow[]>`UPDATE characters SET document = ${tx.json(document as unknown as postgres.JSONValue)},
         handle = ${document.handle}, storage_revision = storage_revision + 1, updated_at = now()
         WHERE id = ${id} AND owner_id = ${ownerId} RETURNING *`
+      await retireUnusedVersions(tx, ownerId)
       const oldSheet = row.document.sheetAssetId
       if (oldSheet && oldSheet !== document.sheetAssetId && !await assetIsUsed(tx, ownerId, oldSheet))
         await tx`UPDATE assets SET deleted_at = now() WHERE id = ${oldSheet} AND owner_id = ${ownerId}`
@@ -171,11 +175,11 @@ export async function createCharacter(ownerId: string, input: unknown) {
   try {
     return await getDb().begin(async (tx) => {
       await lockOwner(tx, ownerId)
-      const [receipt] = await tx`SELECT fingerprint, reply FROM mutation_receipts
+      const [receipt] = await tx`SELECT fingerprint, reply, created_at > now() - interval '7 days' AS replayable FROM mutation_receipts
         WHERE owner_id = ${ownerId} AND scope = 'characters:create' AND client_mutation_id = ${key}`
       if (receipt) {
         if (receipt.fingerprint !== requestHash) fail(409, 'mutation_id_reused', 'This mutation ID was already used for a different request')
-        return receipt.reply
+        return replayReceipt(receipt.reply, receipt.replayable)
       }
       const [existing] = await tx<CharacterRow[]>`SELECT * FROM characters WHERE id = ${id}`
       if (existing) fail(409, 'character_exists', 'This character ID is unavailable')
@@ -242,13 +246,22 @@ export async function buildCharacterSheet(ownerId: string, id: string, input: un
   mutationKey(request.clientMutationId)
   // The expensive composition happens outside the transaction. The final mutation checks
   // the same storage revision again before writing any files or adopting its result.
-  const snapshot = await ownedCharacter(getDb(), ownerId, id)
-  if (snapshot.storage_revision !== value.expectedRevision && value.clientMutationId) {
-    // Permit an exact retry after a lost response without composing again.
-    return mutateCharacter(ownerId, id, request, { operation: 'sheet' }, async () => {
-      fail(409, 'revision_conflict', 'This character changed. Reload it before building a sheet.')
-    })
+  const [prior] = value.clientMutationId ? await getDb()`SELECT 1 FROM character_mutations
+    WHERE owner_id = ${ownerId} AND character_id = ${id} AND mutation_id = ${String(value.clientMutationId)}` : []
+  const replayOrConflict = () => mutateCharacter(ownerId, id, request, { operation: 'sheet' }, async () => {
+    fail(409, 'revision_conflict', 'This character changed. Reload it before building a sheet.')
+  })
+  if (prior) return replayOrConflict()
+  let snapshot: CharacterRow
+  try { snapshot = await ownedCharacter(getDb(), ownerId, id) }
+  catch (error) {
+    // A duplicate may commit and the character may be deleted after the precheck.
+    if (error && typeof error === 'object' && 'statusCode' in error && error.statusCode === 404) return replayOrConflict()
+    throw error
   }
+  // A duplicate can commit between the receipt precheck and this snapshot. Recheck
+  // under the owner lock before treating the newer revision as a conflicting edit.
+  if (snapshot.storage_revision !== value.expectedRevision) return replayOrConflict()
   assertCharacterRevision(snapshot, value.expectedRevision)
   requireIdentity(snapshot.document)
   if (!snapshot.document.face.approved || !snapshot.document.body.approved)
@@ -278,7 +291,8 @@ export async function publishCharacter(ownerId: string, id: string, input: unkno
       await validatePhotos(tx, ownerId, document)
       await ownedAsset(tx, ownerId, document.sheetAssetId)
       if (document.characterVersionId && document.savedAt) return document
-      const [count] = await tx`SELECT count(*)::int AS count FROM character_versions WHERE owner_id = ${ownerId}`
+      await retireUnusedVersions(tx, ownerId)
+      const [count] = await tx`SELECT count(*)::int AS count FROM character_versions WHERE owner_id = ${ownerId} AND retired_at IS NULL`
       if (Number(count!.count) >= 2000) fail(413, 'quota_exceeded', 'Your published character version limit has been reached')
       document.characterVersionId = randomUUID()
       document.savedAt = Date.now()
@@ -294,15 +308,16 @@ export async function deleteCharacter(ownerId: string, id: string, input: unknow
   const scope = `characters:${id}:delete`
   return getDb().begin(async (tx) => {
     await lockOwner(tx, ownerId)
-    const [receipt] = await tx`SELECT fingerprint, reply FROM mutation_receipts
+    const [receipt] = await tx`SELECT fingerprint, reply, created_at > now() - interval '7 days' AS replayable FROM mutation_receipts
       WHERE owner_id = ${ownerId} AND scope = ${scope} AND client_mutation_id = ${key}`
     if (receipt) {
       if (receipt.fingerprint !== requestHash) fail(409, 'mutation_id_reused', 'This mutation ID was already used for a different request')
-      return receipt.reply
+      return replayReceipt(receipt.reply, receipt.replayable)
     }
     const row = await ownedCharacter(tx, ownerId, id)
     assertCharacterRevision(row, value.expectedRevision)
     await tx`UPDATE characters SET deleted_at = now(), storage_revision = storage_revision + 1 WHERE id = ${id} AND owner_id = ${ownerId}`
+    await retireUnusedVersions(tx, ownerId)
     // Published versions and their sources remain available to existing pinned references.
     if (row.document.sheetAssetId && !await assetIsUsed(tx, ownerId, row.document.sheetAssetId))
       await tx`UPDATE assets SET deleted_at = now() WHERE id = ${row.document.sheetAssetId} AND owner_id = ${ownerId}`

@@ -5,7 +5,7 @@ export type Aspect = '1:1' | '16:9' | '9:16'
 export type ImageQuality = '1k' | '2k'
 export type VideoQuality = '480p' | '720p'
 
-export type TakeStatus = 'queued' | 'running' | 'done' | 'failed'
+export type TakeStatus = 'queued' | 'running' | 'done' | 'failed' | 'unknown'
 
 export interface Draft {
   modelId: string
@@ -24,6 +24,7 @@ export interface Take {
   id: string
   generationId: string
   status: TakeStatus
+  assetId?: string | null
   /** image URL (image mode) or video URL (video mode), set when done */
   url: string | null
   /** poster frame for video takes */
@@ -37,7 +38,8 @@ export interface Generation {
   projectId: string
   createdAt: number
   draft: Draft
-  priceCredits: number
+  priceCredits: number | null
+  priceTokens?: number | null
   generatorId?: string
   takes: Take[]
 }
@@ -110,4 +112,6 @@ export interface LibraryItem {
   url: string
   name: string
   createdAt: number
+  mediaType?: 'image' | 'video'
+  posterUrl?: string | null
 }

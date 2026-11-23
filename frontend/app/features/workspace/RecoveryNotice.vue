@@ -5,14 +5,13 @@ import VButton from '~/shared/ui/VButton.vue'
 import {
   createDraftRecovery,
   type RecoveryDraft,
-  type RecoveryKind,
 } from '~/shared/persistence/recovery'
 import { useWorkspaceStore } from '~/stores/workspace'
 import { useStudioStore } from '~/stores/studio'
 import { useCharactersStore } from '~/stores/characters'
 import type { Project } from '~/entities/studio/types'
 const props = defineProps<{ drafts: RecoveryDraft[] }>()
-const emit = defineEmits<{ handled: [id: string, kind: RecoveryKind] }>()
+const emit = defineEmits<{ handled: [key: string]; refresh: [] }>()
 const workspace = useWorkspaceStore()
 const studio = useStudioStore()
 const characters = useCharactersStore()
@@ -29,13 +28,16 @@ function title(draft: RecoveryDraft) {
       : 'Untitled character'
 }
 function discard(draft: RecoveryDraft) {
-  if (!workspace.userId) return
-  recovery.remove(workspace.userId, draft.kind, draft.id)
-  emit('handled', draft.id, draft.kind)
+  if (workspace.userId !== draft.userId) return
+  if (recovery.discard(draft)) emit('handled', draft.key)
+  else {
+    emit('refresh')
+    toast('This draft changed in another editor. The latest copy has been kept.')
+  }
 }
 async function restore(draft: RecoveryDraft) {
-  if (pending.value) return
-  pending.value = draft.id
+  if (pending.value || workspace.userId !== draft.userId) return
+  pending.value = draft.key
   try {
     let destination: string
     if (draft.kind === 'project') {
@@ -45,11 +47,11 @@ async function restore(draft: RecoveryDraft) {
       const copy = await studio.createProjectAsync(
         `${title(draft)} (recovered)`.slice(0, 120),
         source,
-        `project:recover:${draft.id}`,
+        `project:recover:${draft.key}`,
       )
       destination = `/p/${copy.id}`
     } else {
-      const copy = await characters.restoreCopy(draft.payload, draft.id)
+      const copy = await characters.restoreCopy(draft.payload, draft.key)
       destination = `/characters/${copy.id}`
     }
     discard(draft)
@@ -72,7 +74,7 @@ async function restore(draft: RecoveryDraft) {
         These edits were kept on this device before your last visit ended. Restore a new copy to
         keep your saved work intact.
       </p>
-      <div v-for="draft in drafts" :key="`${draft.kind}:${draft.id}`" class="recovery-row">
+      <div v-for="draft in drafts" :key="draft.key" class="recovery-row">
         <div>
           <strong>{{ title(draft) }}</strong
           ><small
@@ -83,7 +85,7 @@ async function restore(draft: RecoveryDraft) {
         <div class="recovery-actions">
           <button :disabled="!!pending" @click="discard(draft)">Discard</button>
           <VButton variant="primary" :disabled="!!pending" @click="restore(draft)">{{
-            pending === draft.id ? 'Restoring…' : 'Restore copy'
+            pending === draft.key ? 'Restoring…' : 'Restore copy'
           }}</VButton>
         </div>
       </div>

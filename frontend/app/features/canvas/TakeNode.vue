@@ -47,6 +47,7 @@ function pause() {
   }
 }
 const previewUrl = computed(() => (isVideo.value ? take.value?.posterUrl : take.value?.url))
+const downloadUrl = computed(() => take.value?.assetId ? `/api/assets/${encodeURIComponent(take.value.assetId)}/file?variant=source` : take.value?.url)
 </script>
 
 <template>
@@ -86,13 +87,14 @@ const previewUrl = computed(() => (isVideo.value ? take.value?.posterUrl : take.
 
         <!-- failed -->
         <div
-          v-else-if="take.status === 'failed'"
+          v-else-if="take.status === 'failed' || take.status === 'unknown'"
           class="absolute inset-0 flex flex-col items-center justify-center gap-2.5 p-3 text-center"
         >
           <span class="text-[11px] leading-snug text-ink-2">{{
-            take.errorMessage ?? 'Something went wrong.'
+            take.errorMessage ?? (take.status === 'unknown' ? 'Provider outcome unconfirmed. No automatic resubmission.' : 'Generation failed.')
           }}</span>
           <button
+            v-if="!studio.live && take.status === 'failed'"
             type="button"
             class="inline-flex h-7 items-center gap-1 rounded-full border border-line bg-surface px-3 text-[12px] font-medium transition-colors hover:border-line-strong"
             @pointerdown.stop
@@ -101,6 +103,7 @@ const previewUrl = computed(() => (isVideo.value ? take.value?.posterUrl : take.
             <RotateCcw class="size-3" />
             Retry
           </button>
+          <button v-if="studio.live && take.status === 'unknown'" class="text-xs underline" @pointerdown.stop @click.stop="studio.refreshGenerations()">Check status</button>
         </div>
 
         <!-- done -->
@@ -149,6 +152,7 @@ const previewUrl = computed(() => (isVideo.value ? take.value?.posterUrl : take.
               class="take-action flex size-7 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm hover:bg-black/70"
               :class="{ 'is-favorite': take.favorite }"
               :aria-pressed="take.favorite"
+              :disabled="studio.favoritePending[take.id]"
               :aria-label="take.favorite ? 'Remove from favorites' : 'Save to favorites'"
               @click.stop="studio.toggleFavorite(take.id)"
             >
@@ -159,7 +163,7 @@ const previewUrl = computed(() => (isVideo.value ? take.value?.posterUrl : take.
             </button>
             <a
               v-if="take.url"
-              :href="take.url"
+              :href="downloadUrl ?? undefined"
               aria-label="Download output"
               download
               class="take-action flex size-7 items-center justify-center rounded-full bg-black/50 text-white backdrop-blur-sm hover:bg-black/70"
@@ -183,7 +187,7 @@ const previewUrl = computed(() => (isVideo.value ? take.value?.posterUrl : take.
     <template #ports>
       <span class="node-port output-port" style="top: 28px; left: -8px; right: auto" />
       <button
-        v-if="take?.status === 'done'"
+        v-if="take?.status === 'done' && (!isVideo || take.posterUrl)"
         class="node-port output-port"
         style="top: 28px"
         data-port="out"

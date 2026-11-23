@@ -45,7 +45,7 @@ const options = computed<MentionOption[]>(() => {
     ...characters.saved.map((character) =>
       studio.assetMentionOption(props.projectId, props.nodeId, characterAsset(character)),
     ),
-    ...studio.library.map((item) =>
+    ...studio.library.filter((item) => item.mediaType !== 'video').map((item) =>
       studio.assetMentionOption(props.projectId, props.nodeId, {
         id: studio.live ? item.id : `image:${item.id}`,
         kind: 'image',

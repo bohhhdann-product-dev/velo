@@ -2,9 +2,25 @@ export class ApiError extends Error {
   constructor(
     public status: number,
     message: string,
+    public code?: string,
   ) {
     super(message)
   }
+}
+export function requiresReload(cause: unknown) {
+  const error = cause as { status?: number; code?: string }
+  return (
+    error?.status === 410 ||
+    ['revision_conflict', 'stale_character_revision', 'receipt_expired', 'price_changed'].includes(error?.code ?? '')
+  )
+}
+export function isDefinitiveRejection(cause: unknown) {
+  const error = cause as { status?: number; code?: string }
+  if (error?.code === 'generation_disabled') return true
+  return (
+    !!error?.status && error.status >= 400 && error.status < 500 &&
+    error.status !== 408 && error.status !== 410 && error.code !== 'receipt_expired'
+  )
 }
 export function createWorkspaceApi(getToken: () => Promise<string | null>) {
   const requests = new Set<AbortController>()
@@ -41,13 +57,25 @@ export function createWorkspaceApi(getToken: () => Promise<string | null>) {
               : multipart
                 ? (options.body as FormData)
                 : JSON.stringify(options.body),
+        }).catch((cause: unknown) => {
+          if (cause instanceof TypeError)
+            throw new Error('Couldn’t reach Vela. Check your connection and try again.', { cause })
+          throw cause
         })
-        const data = await response.json().catch(() => ({}))
+        // A successful status with an unreadable body still has an unknown outcome.
+        const data = response.ok
+          ? await response.json()
+          : await response.json().catch(() => ({}))
         if (!active) throw new DOMException('Session changed', 'AbortError')
         if (!response.ok)
           throw new ApiError(
             response.status,
-            data.message ?? data.statusMessage ?? 'The request could not be completed.',
+            response.status === 410
+              ? 'This earlier request can no longer be replayed. Reload to check the saved result before continuing.'
+              : typeof data?.data?.message === 'string'
+                ? data.data.message
+                : data?.message ?? data?.statusMessage ?? 'The request could not be completed.',
+            typeof data?.data?.code === 'string' ? data.data.code : undefined,
           )
         return data as T
       } finally {

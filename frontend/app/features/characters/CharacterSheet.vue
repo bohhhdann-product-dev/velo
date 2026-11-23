@@ -6,18 +6,28 @@ import VModal from '~/shared/ui/VModal.vue'
 import { characterPhotos, type Character } from '~/entities/character/types'
 import { composeCharacterSheet } from '~/entities/character/sheet'
 import { useCharactersStore } from '~/stores/characters'
-const props = defineProps<{ character: Character; returning?: boolean }>()
+import { useStudioStore } from '~/stores/studio'
+import { characterVideoBlocked } from '~/entities/studio/generation'
+const props = defineProps<{ character: Character; returning?: boolean; useBlockedReason?: string }>()
 const emit = defineEmits<{
   saved: []
   useVideo: []
+  useImage: []
   edit: [step: 'face' | 'body']
 }>()
 const characters = useCharactersStore()
+const studio = useStudioStore()
+const videoBlocked = computed(() => studio.live ? characterVideoBlocked(studio.generationCapabilities) : '')
 const busy = shallowRef(false)
 const error = shallowRef('')
 const previewOpen = shallowRef(false)
 const facePhotos = computed(() => characterPhotos(props.character, 'face'))
 const bodyPhotos = computed(() => characterPhotos(props.character, 'body'))
+const downloadUrl = computed(() =>
+  props.character.sheetAssetId
+    ? `/api/assets/${encodeURIComponent(props.character.sheetAssetId)}/file?variant=source`
+    : props.character.sheetUrl,
+)
 let active = true
 onBeforeUnmount(() => {
   active = false
@@ -51,7 +61,7 @@ async function save() {
     error.value = await characters.saveAsync(props.character.id)
     if (error.value || !active) return
     toast('Character saved')
-    emit('saved')
+    if (!props.useBlockedReason) emit('saved')
   } catch (cause) {
     if (active)
       error.value = cause instanceof Error ? cause.message : 'Could not save character.'
@@ -107,7 +117,7 @@ async function save() {
           <span>Assembled from your photos</span
           ><a
             v-if="character.sheetUrl"
-            :href="character.sheetUrl"
+            :href="downloadUrl ?? undefined"
             :download="`${character.handle}-reference-sheet.${characters.live ? 'webp' : 'jpg'}`"
             ><Download class="size-3.5" /> Download</a
           >
@@ -157,7 +167,7 @@ async function save() {
         >
         <template v-else-if="!character.savedAt"
           ><VButton variant="primary" :disabled="busy" @click="save"
-            >{{ returning ? 'Save & use character' : 'Save character'
+            >{{ returning && !useBlockedReason ? 'Save & use character' : 'Save character'
             }}<ArrowRight class="size-4" /></VButton
           ><button class="rebuild-sheet" :disabled="busy" @click="build">
             <RefreshCw class="size-3.5" :class="{ 'animate-spin': busy }" />{{
@@ -167,10 +177,11 @@ async function save() {
         >
         <template v-else
           ><div class="saved-character"><Check class="size-4" /> Saved to Characters</div>
-          <VButton variant="primary" @click="returning ? emit('saved') : emit('useVideo')"
-            >{{ returning ? 'Use in prompt' : 'Use in a video'
+          <VButton variant="primary" :disabled="!!useBlockedReason" @click="returning ? emit('saved') : videoBlocked ? emit('useImage') : emit('useVideo')"
+            >{{ returning ? 'Use in prompt' : videoBlocked ? 'Use in image' : 'Use in a video'
             }}<ArrowRight class="size-4" /></VButton
         ></template>
+        <p v-if="videoBlocked" class="sheet-explanation">{{ videoBlocked }}</p>
         <p v-if="error" role="alert" class="character-error">{{ error }}</p>
       </aside>
     </div>
@@ -259,15 +270,17 @@ async function save() {
 }
 .sheet-caption {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 13px 16px;
+  padding: 6px 16px;
   font-size: 10px;
   color: var(--ink-3);
 }
 .sheet-caption a {
   display: flex;
   align-items: center;
+  min-height: 32px;
   gap: 5px;
   color: var(--ink-2);
 }
@@ -328,6 +341,8 @@ async function save() {
   margin-top: 2px;
 }
 .sheet-source button {
+  min-width: 36px;
+  min-height: 32px;
   color: var(--ink-3);
   font-size: 11px;
 }
@@ -341,6 +356,7 @@ async function save() {
 }
 .rebuild-sheet {
   display: flex;
+  min-height: 32px;
   align-items: center;
   justify-content: center;
   gap: 7px;

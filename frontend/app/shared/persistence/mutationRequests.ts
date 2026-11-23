@@ -1,3 +1,5 @@
+import { isDefinitiveRejection } from '../api/workspace'
+
 type Options = { method: string; body: unknown }
 /** Retain a mutation after transport/5xx failures, when its server outcome is unknown. */
 export function createMutationRequests(
@@ -10,7 +12,14 @@ export function createMutationRequests(
   async function run<T>(key: string, path: string, options: Options): Promise<T> {
     let entry = pending.get(key)
     if (!entry) {
-      entry = { path, options: JSON.parse(JSON.stringify(options)) }
+      let body: unknown
+      if (options.body instanceof FormData) {
+        // Copy the fields while retaining immutable File bytes for exact retries.
+        const form = new FormData()
+        for (const [name, value] of options.body.entries()) form.append(name, value)
+        body = form
+      } else body = options.body === undefined ? undefined : JSON.parse(JSON.stringify(options.body))
+      entry = { path, options: { ...options, body } }
       pending.set(key, entry)
     }
     if (!entry.running) {
@@ -21,8 +30,7 @@ export function createMutationRequests(
           return value
         })
         .catch((cause) => {
-          const status = (cause as { status?: number }).status
-          if (status && status >= 400 && status < 500 && pending.get(key) === current)
+          if (isDefinitiveRejection(cause) && pending.get(key) === current)
             pending.delete(key)
           throw cause
         })
@@ -32,5 +40,10 @@ export function createMutationRequests(
     }
     return entry.running as Promise<T>
   }
-  return { run, has: (key: string) => pending.has(key), clear: () => pending.clear() }
+  return {
+    run,
+    has: (key: string) => pending.has(key),
+    forget: (key: string) => pending.delete(key),
+    clear: () => pending.clear(),
+  }
 }

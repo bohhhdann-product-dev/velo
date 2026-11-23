@@ -38,6 +38,7 @@ const referenceSchema = z.object({
 const nodeSchema = z.discriminatedUnion('type', [
   z.object({ ...base, type: z.literal('generator'), number: z.number().int().min(1).max(100_000).optional(), draft: draftSchema }).strict(),
   referenceSchema,
+  z.object({ ...base, type: z.literal('take'), takeId: idSchema, generationId: idSchema }).strict(),
 ])
 const edgeSchema = z.object({
   id: idSchema,
@@ -87,7 +88,7 @@ function validateGraph(document: ProjectCreate | ProjectUpdate) {
         if (handles.has(normalized)) invalid('Reference handles must be unique.')
         handles.add(normalized)
       }
-    } else if (node.draft.referenceId !== null && nodes.get(node.draft.referenceId)?.type !== 'reference') {
+    } else if (node.type === 'generator' && node.draft.referenceId !== null && nodes.get(node.draft.referenceId)?.type !== 'reference') {
       invalid('A draft reference must point to a reference node in this project.')
     }
   }
@@ -96,11 +97,11 @@ function validateGraph(document: ProjectCreate | ProjectUpdate) {
   for (const edge of document.edges) {
     const from = nodes.get(edge.from)
     const to = nodes.get(edge.to)
-    // Generation output nodes are unavailable until real generation is implemented.
-    if (from?.type !== 'reference' || to?.type !== 'generator' || edge.from === edge.to) {
-      invalid('Edges must connect an existing reference to an existing generator.')
-    }
-    if (edge.slot && to.draft.mode !== 'video') invalid('Frame slots require a video generator.')
+    const input = (from?.type === 'reference' || from?.type === 'take') && to?.type === 'generator'
+    const output = from?.type === 'generator' && to?.type === 'take' && !edge.slot
+    if ((!input && !output) || edge.from === edge.to) invalid('Connect a reference or result to a generator, or a generator to its result.')
+    if (output) continue
+    if (edge.slot && (to?.type !== 'generator' || to.draft.mode !== 'video')) invalid('Frame slots require a video generator.')
     const key = `${edge.from}:${edge.to}:${edge.slot ?? ''}`
     if (connections.has(key)) invalid('Duplicate connections are not allowed.')
     connections.add(key)
@@ -117,7 +118,6 @@ function validateGraph(document: ProjectCreate | ProjectUpdate) {
     if (new Set(frames.map((edge) => edge.slot)).size !== frames.length) invalid('A frame slot has more than one input.')
     if (references.length > (node.draft.mode === 'image' ? 6 : 15)) invalid('This generator has too many references.')
   }
-  // The permitted reference -> generator topology is acyclic by construction.
 }
 
 export function parseProjectCreate(value: unknown): ProjectCreate {

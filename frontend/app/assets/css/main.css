@@ -6,6 +6,13 @@
 --------------------------------------------------------------------------- */
 
 :root {
+  /* shared by the studio, public pages and authentication */
+  --font-ui:
+    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Inter',
+    'Segoe UI', sans-serif;
+  --radius-control: 8px;
+  --radius-media: 20px;
+
   /* surfaces */
   --canvas: #101112;
   --surface: #1c1d1f;
@@ -16,7 +23,7 @@
   /* ink */
   --ink: #eeeef0;
   --ink-2: #a6a9af;
-  --ink-3: #7d8189;
+  --ink-3: #90949c;
   --ink-inverse: #0a0a0b;
 
   /* lines */
@@ -41,9 +48,7 @@
 }
 
 @theme inline {
-  --font-sans:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Inter',
-    'Segoe UI', sans-serif;
+  --font-sans: var(--font-ui);
 
   --color-canvas: var(--canvas);
   --color-surface: var(--surface);
@@ -66,10 +71,10 @@
   --color-success: var(--success);
   --color-warning: var(--warning);
 
-  --radius-xs: 8px;
+  --radius-xs: var(--radius-control);
   --radius-sm: 10px;
   --radius-md: 14px;
-  --radius-lg: 20px;
+  --radius-lg: var(--radius-media);
   --radius-xl: 28px;
 
   --shadow-card: var(--shadow-card);
@@ -86,9 +91,7 @@ html {
 body {
   background: var(--canvas);
   color: var(--ink);
-  font-family:
-    -apple-system, BlinkMacSystemFont, 'SF Pro Text', 'SF Pro Display', 'Helvetica Neue', 'Inter',
-    'Segoe UI', sans-serif;
+  font-family: var(--font-ui);
   font-size: 15px;
   line-height: 1.47;
   letter-spacing: -0.01em;
@@ -204,9 +207,11 @@ a {
   align-items: center;
   gap: 9px;
   color: var(--ink);
+  font-family: var(--font-ui);
   font-size: 27px;
   font-weight: 650;
   letter-spacing: -1.6px;
+  line-height: 1.47;
 }
 .brand-mark {
   width: 29px;
@@ -319,6 +324,7 @@ a {
 .project-link a {
   display: flex;
   align-items: center;
+  min-height: 36px;
   min-width: 0;
   gap: 9px;
   flex: 1;
@@ -338,6 +344,7 @@ a {
 .new-project {
   display: flex;
   align-items: center;
+  min-height: 32px;
   gap: 8px;
   margin: 14px 8px;
   color: var(--ink-3);
@@ -500,7 +507,7 @@ a {
 .canvas-stage {
   flex: 1;
   min-width: 0;
-  overflow: hidden;
+  overflow: clip;
   border: 1px solid var(--line);
   border-radius: 14px;
 }
@@ -523,7 +530,7 @@ a {
   font-size: 10px;
 }
 .node-frame {
-  --node-radius: 20px;
+  --node-radius: var(--radius-media);
   position: relative;
   user-select: none;
   border: 1px solid #ffffff14;
@@ -920,7 +927,7 @@ a {
   gap: 7px;
   height: 34px;
   padding: 0 12px;
-  border-radius: 8px;
+  border-radius: var(--radius-control);
   background: var(--accent);
   color: #09200f;
   font-size: 12px;
@@ -933,7 +940,7 @@ a {
   font-size: 11px;
 }
 .generate-button:hover {
-  background: #4ada6c;
+  background: var(--accent-hover);
 }
 .generate-button:disabled {
   opacity: 0.4;
@@ -1064,6 +1071,19 @@ kbd {
   }
   .project-breadcrumb {
     display: none;
+  }
+}
+@media (max-width: 600px) {
+  .project-header:has(.save-status[role='alert']) {
+    height: auto;
+    min-height: 72px;
+    flex-wrap: wrap;
+    gap: 8px 10px;
+    padding-block: 12px;
+  }
+  .project-header-actions:has(.save-status[role='alert']) {
+    flex-basis: 100%;
+    margin-left: 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {

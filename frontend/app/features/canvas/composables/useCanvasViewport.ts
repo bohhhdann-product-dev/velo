@@ -132,6 +132,7 @@ export function useCanvasViewport(
   })
   return {
     view,
+    paneSize: size,
     visibleBounds,
     centerOn,
     center,

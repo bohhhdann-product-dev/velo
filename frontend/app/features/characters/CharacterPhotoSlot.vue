@@ -9,7 +9,7 @@ const props = defineProps<{
   required?: boolean
   body?: boolean
 }>()
-const emit = defineEmits<{ change: [photo: CharacterPhoto | null] }>()
+const emit = defineEmits<{ change: [photo: CharacterPhoto | null]; busy: [value: boolean] }>()
 const studio = useStudioStore()
 const input = useTemplateRef<HTMLInputElement>('input')
 const busy = shallowRef(false)
@@ -18,11 +18,13 @@ const error = shallowRef('')
 let request = 0
 onBeforeUnmount(() => {
   request++
+  if (busy.value) emit('busy', false)
 })
 async function accept(file?: File) {
   if (!file || busy.value) return
   const current = ++request
   busy.value = true
+  emit('busy', true)
   error.value = ''
   try {
     if (studio.live) {
@@ -42,7 +44,10 @@ async function accept(file?: File) {
     if (current === request)
       error.value = cause instanceof Error ? cause.message : 'Could not open this image.'
   } finally {
-    if (current === request) busy.value = false
+    if (current === request) {
+      busy.value = false
+      emit('busy', false)
+    }
   }
 }
 function choose(event: Event) {

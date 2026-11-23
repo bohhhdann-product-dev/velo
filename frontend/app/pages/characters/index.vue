@@ -1,12 +1,17 @@
 <script setup lang="ts">
-import { Plus, UserRound, ArrowRight, Video, Trash2, Search, ScanFace } from 'lucide-vue-next'
+import { Plus, UserRound, ArrowRight, Video, Image as ImageIcon, Trash2, Search, ScanFace } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
 import VButton from '~/shared/ui/VButton.vue'
 import { useCharactersStore } from '~/stores/characters'
+import { useStudioStore } from '~/stores/studio'
+import { ApiError } from '~/shared/api/workspace'
 import { useCharacterPlacement } from '~/features/characters/useCharacterPlacement'
 import { characterStep } from '~/entities/character/types'
+import { characterVideoBlocked } from '~/entities/studio/generation'
 import '~/assets/css/characters.css'
 const characters = useCharactersStore()
+const studio = useStudioStore()
+const videoBlocked = computed(() => studio.live ? characterVideoBlocked(studio.generationCapabilities) : '')
 const route = useRoute()
 const search = shallowRef('')
 const filter = shallowRef<'all' | 'saved' | 'draft'>('all')
@@ -17,7 +22,7 @@ const shown = computed(() =>
       `${c.name} ${c.handle}`.toLowerCase().includes(search.value.toLowerCase()),
   ),
 )
-const { useInVideo } = useCharacterPlacement()
+const { useInVideo, useInImage } = useCharacterPlacement()
 const pending = shallowRef(false)
 async function create() {
   if (pending.value) return
@@ -53,7 +58,12 @@ async function remove(id: string) {
           },
     )
   } catch (cause) {
-    toast.error(cause instanceof Error ? cause.message : 'Could not remove character.')
+    toast.error(
+      cause instanceof Error ? cause.message : 'Could not remove character.',
+      cause instanceof ApiError && cause.status === 410
+        ? { duration: Infinity, action: { label: 'Reload workspace', onClick: () => window.location.reload() } }
+        : undefined,
+    )
   } finally {
     pending.value = false
   }
@@ -67,7 +77,7 @@ async function remove(id: string) {
         <h1>
           Characters<span v-if="characters.items.length">{{ characters.items.length }}</span>
         </h1>
-        <p>Your face. Your presence. Ready for your next scene.</p>
+        <p>{{ studio.live ? 'Reviewed references for image generation. Video needs separate identity authorization.' : 'Your face. Your presence. Ready for your next scene.' }}</p>
       </div>
       <VButton variant="primary" :disabled="pending" @click="create"
         ><Plus class="size-4" /> Create character</VButton
@@ -120,8 +130,8 @@ async function remove(id: string) {
             </div></NuxtLink
           >
           <div class="character-card-actions">
-            <button v-if="character.savedAt" @click="useInVideo(character)">
-              <Video class="size-3.5" /> Use in video</button
+            <button v-if="character.savedAt" @click="videoBlocked ? useInImage(character) : useInVideo(character)">
+              <component :is="videoBlocked ? ImageIcon : Video" class="size-3.5" /> {{ videoBlocked ? 'Use in image' : 'Use in video' }}</button
             ><NuxtLink v-else :to="{ path: `/characters/${character.id}`, query: route.query }"
               >Continue {{ characterStep(character) }}<ArrowRight class="size-3.5" /></NuxtLink
             ><button

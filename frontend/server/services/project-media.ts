@@ -2,9 +2,20 @@ import type postgres from 'postgres'
 import { getDb } from '../utils/db'
 import { ASSET_ID, assetUrl, fail, lockOwner, ownedAsset, type Db } from './media'
 
-type ReferenceLike = { type: string; assetId?: string; assetKind?: string; characterVersionId?: string }
+type ReferenceLike = { type: string; assetId?: string; assetKind?: string; characterVersionId?: string; takeId?: string; generationId?: string }
 
 async function checkReference(db: Db, ownerId: string, node: ReferenceLike, allowDeleted = false) {
+  if (node.type === 'take') {
+    if (!ASSET_ID.test(node.takeId ?? '') || !ASSET_ID.test(node.generationId ?? '')) fail(404, 'not_found', 'Generation result not found')
+    const [take] = await db`SELECT t.id, t.status, t.output_asset_id, g.deleted_at FROM generation_takes t JOIN generations g ON g.id = t.generation_id
+      WHERE t.id = ${node.takeId!} AND g.id = ${node.generationId!} AND g.owner_id = ${ownerId}`
+    if (!take || (!allowDeleted && take.deleted_at)) fail(404, 'not_found', 'Generation result not found')
+    if (!allowDeleted && take.status === 'done') {
+      if (!take.output_asset_id) fail(404, 'not_found', 'Generation result not found')
+      await ownedAsset(db, ownerId, take.output_asset_id)
+    }
+    return
+  }
   if (node.type !== 'reference') return
   if (!node.assetId) fail(400, 'invalid_reference', 'A reference requires a stored image')
   if (allowDeleted) {
@@ -15,9 +26,9 @@ async function checkReference(db: Db, ownerId: string, node: ReferenceLike, allo
   if (node.assetKind === 'character') {
     if (!node.characterVersionId || !ASSET_ID.test(node.characterVersionId))
       fail(400, 'invalid_reference', 'A character reference requires a published version')
-    const [version] = await db`SELECT sheet_asset_id FROM character_versions
+    const [version] = await db`SELECT sheet_asset_id, retired_at FROM character_versions
       WHERE id = ${node.characterVersionId} AND owner_id = ${ownerId}`
-    if (!version || version.sheet_asset_id !== node.assetId) fail(404, 'not_found', 'Character version not found')
+    if (!version || version.sheet_asset_id !== node.assetId || (!allowDeleted && version.retired_at)) fail(404, 'not_found', 'Character version not found')
   } else if (node.assetKind !== 'image' || node.characterVersionId) {
     fail(400, 'invalid_reference', 'Invalid image reference')
   }

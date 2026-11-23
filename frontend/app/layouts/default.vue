@@ -9,11 +9,17 @@ import {
   Plus,
   Trash2,
   UsersRound,
+  ShieldCheck,
 } from 'lucide-vue-next'
 import { toast } from 'vue-sonner'
+import VelaBrand from '~/shared/ui/VelaBrand.vue'
 import AccountProfile from '~/features/workspace/AccountProfile.vue'
+import TokenBalance from '~/features/billing/TokenBalance.vue'
 import { useStudioStore } from '~/stores/studio'
+import { useBillingStore } from '~/stores/billing'
+import { ApiError } from '~/shared/api/workspace'
 const studio = useStudioStore()
+const billing = useBillingStore()
 const route = useRoute()
 const collapsed = shallowRef(false)
 const pending = shallowRef(false)
@@ -35,9 +41,14 @@ async function removeProject(id: string) {
   try {
     const active = route.path === `/p/${id}`
     await studio.deleteProjectAsync(id)
-    if (active) await navigateTo(studio.projects[0] ? `/p/${studio.projects[0].id}` : '/')
+    if (active) await navigateTo(studio.projects[0] ? `/p/${studio.projects[0].id}` : '/studio')
   } catch (cause) {
-    toast.error(cause instanceof Error ? cause.message : 'Could not delete the project.')
+    toast.error(
+      cause instanceof Error ? cause.message : 'Could not delete the project.',
+      cause instanceof ApiError && cause.status === 410
+        ? { duration: Infinity, action: { label: 'Reload workspace', onClick: () => window.location.reload() } }
+        : undefined,
+    )
   } finally {
     pending.value = false
   }
@@ -47,17 +58,8 @@ async function removeProject(id: string) {
   <div class="studio-shell" :class="{ 'sidebar-collapsed': collapsed }">
     <aside class="studio-sidebar">
       <div class="brand-row">
-        <NuxtLink to="/" class="brand" aria-label="Vela studio">
-          <svg class="brand-mark" viewBox="0 0 32 32" fill="none" aria-hidden="true">
-            <path
-              d="M7 6l9 21L26 6M11 6l5 12 6-12"
-              stroke="currentColor"
-              stroke-width="2"
-              stroke-linejoin="round"
-            />
-            <circle cx="26" cy="6" r="3" fill="var(--accent)" />
-          </svg>
-          <span class="sidebar-label">vela<span class="brand-period">.</span></span>
+        <NuxtLink to="/studio" class="brand" aria-label="Vela studio">
+          <VelaBrand />
         </NuxtLink>
         <button
           class="icon-button sidebar-collapse"
@@ -74,7 +76,7 @@ async function removeProject(id: string) {
       <nav class="primary-nav" aria-label="Main navigation">
         <NuxtLink
           v-for="item in [
-            { to: '/', label: 'Canvas', icon: LayoutGrid },
+            { to: '/studio', label: 'Canvas', icon: LayoutGrid },
             { to: '/characters', label: 'Characters', icon: UsersRound },
             { to: '/library', label: 'Library', icon: Images },
             { to: '/favorites', label: 'Favorites', icon: Heart },
@@ -85,7 +87,7 @@ async function removeProject(id: string) {
           class="nav-item"
           :class="{
             active:
-              item.to === '/' ? route.path.startsWith('/p/') : route.path.startsWith(item.to),
+              item.to === '/studio' ? route.path.startsWith('/p/') || route.path === '/studio' : route.path.startsWith(item.to),
           }"
           ><component :is="item.icon" class="size-[17px] shrink-0" /><span
             class="sidebar-label"
@@ -131,6 +133,10 @@ async function removeProject(id: string) {
         </button>
       </div>
       <div class="sidebar-bottom">
+        <NuxtLink v-if="billing.wallet?.isAdmin" to="/vl-admin-panel" class="nav-item" title="Admin panel">
+          <ShieldCheck class="size-[17px] shrink-0" /><span class="sidebar-label">Admin panel</span>
+        </NuxtLink>
+        <TokenBalance />
         <div class="workspace-note sidebar-label">
           <span class="status-dot" />
           {{ studio.live ? 'Your workspace' : 'Demo workspace' }}

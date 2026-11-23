@@ -85,7 +85,7 @@ const tool = shallowRef<'select' | 'pan'>('select')
 const spaceDown = shallowRef(false)
 const zoomMenu = shallowRef(false)
 const shortcuts = shallowRef(false)
-const minimapOpen = shallowRef(true)
+const minimapOpen = shallowRef(false)
 const minimapToggle = ref<HTMLButtonElement | null>(null)
 const minimapId = useId()
 const minimapNodes = computed(() =>
@@ -425,9 +425,11 @@ function zoomAction(action: 'reset' | 'all' | 'selection') {
   zoomMenu.value = false
 }
 async function run(id: string) {
-  const result = studio.generateFromNode(props.projectId, id)
-  if (!result.ok) {
-    toast.error(result.error)
+  try {
+    const result = await studio.generateFromNodeAsync(props.projectId, id)
+    if (result && !result.ok) { toast.error(result.error); return }
+  } catch (cause) {
+    toast.error(cause instanceof Error ? cause.message : 'Could not submit generation.')
     return
   }
   await nextTick()
@@ -598,7 +600,7 @@ onBeforeUnmount(() => {
   <div
     v-if="studio.project(projectId)"
     ref="container"
-    class="vela-board relative size-full touch-none overflow-hidden outline-none"
+    class="vela-board relative size-full touch-none overflow-clip outline-none"
     :class="{
       'cursor-grab': tool === 'pan' || spaceDown,
       'cursor-grabbing': gesture?.kind === 'pan',

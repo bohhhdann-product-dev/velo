@@ -11,7 +11,7 @@ import { Check, ChevronDown } from 'lucide-vue-next'
 const props = defineProps<{
   /** short name shown before the value, e.g. "Aspect" */
   label?: string
-  options: { value: T; label: string; shortLabel?: string }[]
+  options: { value: T; label: string; shortLabel?: string; disabled?: boolean; reason?: string }[]
 }>()
 
 const model = defineModel<T>({ required: true })
@@ -41,7 +41,9 @@ const current = computed(
         <DropdownMenuItem
           v-for="option in options"
           :key="String(option.value)"
-          class="flex items-center justify-between gap-3 rounded-(--radius-xs) px-3 py-2 text-[13px] cursor-pointer outline-none data-highlighted:bg-surface-2"
+          :disabled="option.disabled"
+          :title="option.reason"
+          class="flex items-center justify-between gap-3 rounded-(--radius-xs) px-3 py-2 text-[13px] cursor-pointer outline-none data-highlighted:bg-surface-2 data-disabled:opacity-40 data-disabled:cursor-not-allowed"
           @select="model = option.value"
         >
           {{ option.label }}

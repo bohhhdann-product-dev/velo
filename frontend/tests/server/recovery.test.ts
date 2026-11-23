@@ -27,10 +27,48 @@ test('recovery survives a new coordinator and scopes identical resource IDs by a
   assert.equal(reopened.list('user').length, 0)
   assert.equal((reopened.list('user:a').find((draft) => draft.kind === 'project')!.payload as { title: string }).title, 'A private draft')
   reopened.remove('user:a', 'project', 'same')
+  assert.equal(reopened.list('user:a').length, 2, 'a new coordinator cannot acknowledge a previous editor')
+  assert.equal(reopened.discard(reopened.list('user:a').find((draft) => draft.kind === 'project')!), true)
   assert.equal(reopened.list('user:a')[0]!.kind, 'character')
   reopened.clearUser('user:a')
   assert.deepEqual(reopened.list('user:a'), [])
   assert.equal(reopened.list('user:b').length, 1, 'logout clears only the previous account')
+})
+
+test('two editors acknowledge only their own candidate, leaving dismissed and legacy recovery intact', () => {
+  const storage = new MemoryStorage()
+  const first = createDraftRecovery(storage)
+  const second = createDraftRecovery(storage)
+  first.save('user', 'project', 'p', { title: 'Still unsaved in first editor' }, 1)
+  const prior = first.list('user')[0]!
+  second.save('user', 'project', 'p', { title: 'Second editor' }, 1)
+  assert.equal(second.list('user').length, 2)
+  second.remove('user', 'project', 'p')
+  assert.deepEqual(first.list('user'), [prior], 'another editor ACK must not erase this candidate')
+
+  const legacyKey = 'vela:recovery:v1:user:project:p'
+  storage.setItem(legacyKey, JSON.stringify({ version: 1, userId: 'user', kind: 'project', id: 'p', revision: 0, updatedAt: 1, payload: { title: 'Legacy draft' } }))
+  const reopened = createDraftRecovery(storage)
+  reopened.save('user', 'project', 'p', { title: 'Saved after dismissing recovery' }, 2)
+  reopened.remove('user', 'project', 'p')
+  assert.equal(reopened.list('user').length, 2, 'ACK leaves all previous session candidates untouched')
+  const legacy = reopened.list('user').find((draft) => draft.version === 1)!
+  assert.equal(reopened.discard(legacy), true)
+  assert.deepEqual(reopened.list('user'), [prior], 'explicit discard targets the exact selected candidate')
+})
+
+test('an explicit decision on an old candidate cannot erase a newer draft from that editor', () => {
+  const storage = new MemoryStorage()
+  const editor = createDraftRecovery(storage)
+  const notice = createDraftRecovery(storage)
+  editor.save('user', 'character', 'c', { name: 'Before' }, 1)
+  const shown = notice.list('user')[0]!
+  editor.save('user', 'character', 'c', { name: 'Typed after the notice opened' }, 1)
+  assert.equal(notice.discard(shown), false)
+  const latest = notice.list('user')[0]!
+  assert.deepEqual(latest.payload, { name: 'Typed after the notice opened' })
+  assert.equal(notice.discard(latest), true)
+  assert.deepEqual(notice.list('user'), [])
 })
 
 test('recovery retains asset/version metadata and excludes hydrated delivery/auth data recursively', () => {

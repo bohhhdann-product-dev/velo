@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { randomUUID } from 'node:crypto'
 import { createServer } from 'node:http'
-import { mkdtemp, readFile, rm, utimes } from 'node:fs/promises'
+import { mkdtemp, rm, utimes } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import test from 'node:test'
@@ -12,10 +12,12 @@ import uploadHandler from '../../server/api/assets/index.post'
 import fileHandler from '../../server/api/assets/[id]/file.get'
 import { getDb, closeDb } from '../../server/utils/db'
 import { uploadImage, listAssets, ownedAsset, deleteAsset, cleanupMedia, setAssetFavorite, MAX_UPLOAD_BYTES,
-  lockOwner, persistImage, normalizeImage, rollbackFiles } from '../../server/services/media'
+  lockOwner, persistImage, normalizeImage, rollbackFiles, retireUnusedVersions, assetUrl } from '../../server/services/media'
 import { createCharacter, getCharacter, updateCharacter, approveCharacter, buildCharacterSheet, publishCharacter, deleteCharacter } from '../../server/services/characters'
 import { validateProjectReferences, hydrateProjectReferences } from '../../server/services/project-media'
 import { getStorage } from '../../server/services/storage'
+import { deleteProject } from '../../server/services/projects'
+import { migrate } from '../../scripts/migrate.mjs'
 
 const databaseUrl = process.env.VELA_TEST_DATABASE_URL
 test('private media and character lifecycle against PostgreSQL', {
@@ -41,16 +43,15 @@ test('private media and character lifecycle against PostgreSQL', {
     process.env.VELA_LOCAL_AUTH_TOKEN = 'local-media-test-token-1234567890'
     process.env.VELA_LOCAL_USER_ID = 'alice'
     process.env.NODE_ENV = 'test'
+    await migrate(process.env.DATABASE_URL)
     const db = getDb()
-    for (const file of ['001_foundation.sql', '002_media.sql', '003_project_tombstones.sql']) {
-      await db.unsafe(await readFile(new URL(`../../server/db/migrations/${file}`, import.meta.url), 'utf8'))
-    }
     await db`INSERT INTO app_users (id) VALUES ('alice'), ('bob')`
     await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
     const address = server.address() as { port: number }
     const origin = `http://127.0.0.1:${address.port}`
     process.env.VELA_ALLOWED_ORIGINS = origin
-    const auth = { authorization: `Bearer ${process.env.VELA_LOCAL_AUTH_TOKEN}` }
+    // Deliberately aborted oversize streams must not contaminate later delivery assertions through the client socket pool.
+    const auth = { authorization: `Bearer ${process.env.VELA_LOCAL_AUTH_TOKEN}`, connection: 'close' }
     const bytes = await sharp({ create: { width: 128, height: 96, channels: 3, background: '#a34534' } }).png().toBuffer()
     let first: Awaited<ReturnType<typeof uploadImage>>
     await t.test('authenticated multipart upload returns only private application URLs', async () => {
@@ -58,11 +59,26 @@ test('private media and character lifecycle against PostgreSQL', {
       assert.equal(anonymous.status, 401)
       const body = new FormData()
       body.set('file', new Blob([bytes], { type: 'image/png' }), 'portrait.png')
+      body.set('clientMutationId', randomUUID())
       const response = await fetch(`${origin}/api/assets`, { method: 'POST', headers: auth, body })
       assert.equal(response.status, 201)
       first = (await response.json()).asset
       assert.match(first.url, /^\/api\/assets\/[^/]+\/file\?variant=preview$/)
       assert.equal('source_key' in first, false)
+      const retries = await Promise.all([1, 2].map(async () => {
+        const retried = await fetch(`${origin}/api/assets`, { method: 'POST', headers: auth, body })
+        assert.equal(retried.status, 201)
+        return (await retried.json()).asset
+      }))
+      assert.deepEqual(retries, [first, first], 'Concurrent lost-response retries must not create duplicate stored assets')
+      const changedUpload = new FormData()
+      changedUpload.set('file', new Blob([bytes], { type: 'image/png' }), 'different-name.png')
+      changedUpload.set('clientMutationId', body.get('clientMutationId')!)
+      const reused = await fetch(`${origin}/api/assets`, { method: 'POST', headers: auth, body: changedUpload })
+      assert.equal(reused.status, 409)
+      assert.equal((await reused.json()).data.code, 'mutation_id_reused')
+      changedUpload.delete('clientMutationId')
+      assert.equal((await fetch(`${origin}/api/assets`, { method: 'POST', headers: auth, body: changedUpload })).status, 400)
       const download = await fetch(origin + first.url, { headers: auth })
       assert.equal(download.status, 200)
       assert.equal(download.headers.get('cache-control'), 'private, no-store')
@@ -74,9 +90,11 @@ test('private media and character lifecycle against PostgreSQL', {
       process.env.VELA_LOCAL_USER_ID = 'alice'
       const bad = new FormData()
       bad.set('file', new Blob(['<html>not a photo</html>'], { type: 'image/png' }), 'bad.png')
+      bad.set('clientMutationId', randomUUID())
       assert.equal((await fetch(`${origin}/api/assets`, { method: 'POST', headers: auth, body: bad })).status, 415)
       const oversized = new FormData()
       oversized.set('file', new Blob([Buffer.alloc(MAX_UPLOAD_BYTES + 1)], { type: 'image/png' }), 'too-large.png')
+      oversized.set('clientMutationId', randomUUID())
       assert.equal((await fetch(`${origin}/api/assets`, { method: 'POST', headers: auth, body: oversized })).status, 413)
       // No Content-Length: the body must also be capped while streaming.
       async function* chunks() {
@@ -162,6 +180,16 @@ test('private media and character lifecycle against PostgreSQL', {
       character = await buildCharacterSheet('alice', character.id, sheetRequest)
       assert.deepEqual(await buildCharacterSheet('alice', character.id, sheetRequest), character)
       const asset = await ownedAsset(db, 'alice', character.sheetAssetId)
+      for (const [variant, width, height] of [['source', 2048, 1088], ['preview', 1024, 544]] as const) {
+        const response = await fetch(origin + assetUrl(asset.id, variant), { headers: auth })
+        assert.equal(response.status, 200)
+        const metadata = await sharp(Buffer.from(await response.arrayBuffer())).metadata()
+        assert.equal(metadata.width, width)
+        assert.equal(metadata.height, height)
+      }
+      process.env.VELA_LOCAL_USER_ID = 'bob'
+      assert.equal((await fetch(origin + assetUrl(asset.id, 'source'), { headers: auth })).status, 404)
+      process.env.VELA_LOCAL_USER_ID = 'alice'
       const pixels = await sharp(await getStorage().get(asset.source_key)).extract({ left: 100, top: 200, width: 1, height: 1 }).raw().toBuffer()
       assert.ok(pixels[0]! > pixels[1]! * 1.5, 'Sheet contains the supplied red source photo')
       character = await publishCharacter('alice', character.id, { expectedRevision: character.storageRevision })
@@ -215,6 +243,107 @@ test('private media and character lifecycle against PostgreSQL', {
       const [purged] = await db`SELECT purged_at FROM assets WHERE id = ${unused.id}`
       assert.ok(purged!.purged_at)
     })
+    await t.test('multi-angle no-op saves survive JSONB ordering and only real edits invalidate approvals', async () => {
+      const source = await uploadImage('alice', bytes, 'image/png', 'multi-angle.png')
+      let multi: any = await createCharacter('alice', { name: 'Multi', handle: 'multi', clientMutationId: randomUUID() })
+      const editable = { name: 'Multi', handle: 'multi',
+        face: { photos: { front: { assetId: source.id }, left: { assetId: first.id } }, notes: '' },
+        body: { photos: { front: { assetId: source.id }, left: { assetId: first.id } }, notes: '' } }
+      const save = async () => multi = await updateCharacter('alice', multi.id, {
+        character: editable, expectedRevision: multi.storageRevision, clientMutationId: randomUUID(),
+      })
+      const approve = async () => {
+        for (const stage of ['face', 'body']) multi = await approveCharacter('alice', multi.id, { stage, expectedRevision: multi.storageRevision })
+        multi = await buildCharacterSheet('alice', multi.id, { expectedRevision: multi.storageRevision })
+        multi = await publishCharacter('alice', multi.id, { expectedRevision: multi.storageRevision })
+      }
+      await save()
+      await approve()
+      const published = structuredClone(multi)
+      const [stored] = await db`SELECT document FROM characters WHERE id = ${multi.id}`
+      assert.deepEqual(Object.keys(stored!.document.face.photos), ['left', 'front'], 'Fixture must exercise PostgreSQL key reordering')
+      await save()
+      for (const field of ['revision', 'sheetAssetId', 'characterVersionId', 'savedAt']) assert.equal(multi[field], published[field])
+      assert.equal(multi.storageRevision, published.storageRevision + 1)
+      assert.equal(multi.face.approved, true)
+      assert.equal(multi.body.approved, true)
+
+      editable.body.notes = 'New body detail'
+      await save()
+      assert.equal(multi.face.approved, true)
+      assert.equal(multi.body.approved, false)
+      assert.equal(multi.revision, published.revision + 1)
+      assert.equal(multi.sheetAssetId, null)
+      const [retired] = await db`SELECT retired_at FROM character_versions WHERE id = ${published.characterVersionId}`
+      assert.ok(retired!.retired_at, 'Replacing the last current reference retires the unused version')
+      editable.face.notes = 'New face detail'
+      await save()
+      assert.equal(multi.face.approved, false)
+      assert.equal(multi.body.approved, false)
+      await approve()
+
+      // Legacy unused versions can share a sheet with a current published revision.
+      // Maintenance is bounded and must not remove that still-current sheet.
+      const legacyIds = [randomUUID(), randomUUID(), randomUUID()]
+      for (const id of legacyIds) await db`INSERT INTO character_versions(id, character_id, owner_id, sheet_asset_id, document)
+        SELECT ${id}, character_id, owner_id, sheet_asset_id, document FROM character_versions WHERE id = ${multi.characterVersionId}`
+      const activeLegacy = async () => {
+        const [count] = await db`SELECT count(*)::int AS count FROM character_versions WHERE id IN ${db(legacyIds)} AND retired_at IS NULL`
+        return count!.count
+      }
+      const dry = await cleanupMedia({ limit: 1 })
+      assert.equal(dry.retiredVersions.length, 1)
+      assert.equal(await activeLegacy(), 3, 'Dry-run must leave version rows unchanged')
+      const applied = await cleanupMedia({ dryRun: false, limit: 1 })
+      assert.equal(applied.retiredVersions.length, 1)
+      assert.equal(await activeLegacy(), 2, 'Version retirement respects the maintenance batch bound')
+      await db.begin(async (tx) => { await lockOwner(tx, 'alice'); await retireUnusedVersions(tx, 'alice') })
+      assert.equal(await activeLegacy(), 0)
+      assert.ok(await ownedAsset(db, 'alice', multi.sheetAssetId), 'A shared current sheet survives unused version retirement')
+      const [current] = await db`SELECT retired_at FROM character_versions WHERE id = ${multi.characterVersionId}`
+      assert.equal(current!.retired_at, null)
+      await assert.rejects(db.begin((tx) => validateProjectReferences(tx, 'alice', [{
+        type: 'reference', assetKind: 'character', assetId: multi.sheetAssetId, characterVersionId: legacyIds[0],
+      }])), { statusCode: 404 }, 'A retired version cannot be pinned even when its shared sheet is still live')
+      await assert.rejects(deleteAsset('alice', source.id), { statusCode: 409 })
+      await deleteCharacter('alice', multi.id, { expectedRevision: multi.storageRevision, clientMutationId: randomUUID() })
+      await assert.rejects(ownedAsset(db, 'alice', multi.sheetAssetId), { statusCode: 404 })
+      await deleteAsset('alice', source.id)
+      await assert.rejects(ownedAsset(db, 'alice', source.id), { statusCode: 404 }, 'Deleting an unpinned published character releases its source photos')
+    })
+    await t.test('deleting the last project pin retires its version and releases its source photos', async () => {
+      await deleteProject('alice', 'pinned', { expectedRevision: 1, clientMutationId: randomUUID() })
+      const [version] = await db`SELECT retired_at FROM character_versions WHERE id = ${pin.characterVersionId}`
+      assert.ok(version!.retired_at)
+      await assert.rejects(db.begin((tx) => validateProjectReferences(tx, 'alice', [pin])), { statusCode: 404 })
+      await deleteAsset('alice', first.id)
+      await assert.rejects(ownedAsset(db, 'alice', first.id), { statusCode: 404 })
+    })
+    await t.test('failed storage writes leave no upload receipt or partial asset and allow a safe retry', async () => {
+      const storage = getStorage()
+      const originalPut = storage.put
+      const key = randomUUID()
+      const written: string[] = []
+      storage.put = async (objectKey, contents) => {
+        written.push(objectKey)
+        if (objectKey.endsWith('/preview.webp')) throw new Error('Synthetic storage failure')
+        return originalPut(objectKey, contents)
+      }
+      try {
+        await assert.rejects(uploadImage('alice', bytes, 'image/png', 'retry-after-storage-failure', key), /Synthetic storage failure/)
+      } finally { storage.put = originalPut }
+      const [receipt] = await db`SELECT 1 FROM mutation_receipts WHERE owner_id = 'alice' AND scope = 'assets:upload' AND client_mutation_id = ${key}`
+      assert.equal(receipt, undefined)
+      for (const objectKey of written) {
+        await assert.rejects(storage.get(objectKey), { code: 'ENOENT' })
+        const [asset] = await db`SELECT 1 FROM assets WHERE source_key = ${objectKey} OR preview_key = ${objectKey}`
+        assert.equal(asset, undefined)
+      }
+      const uploaded = await uploadImage('alice', bytes, 'image/png', 'retry-after-storage-failure', key)
+      assert.deepEqual(await uploadImage('alice', bytes, 'image/png', 'retry-after-storage-failure', key), uploaded)
+      const otherOwner = await uploadImage('bob', bytes, 'image/png', 'retry-after-storage-failure', key)
+      assert.notEqual(otherOwner.id, uploaded.id, 'Upload receipts must belong to the verified owner')
+    })
     await t.test('rollback cleanup waits for uncertain transactions and preserves successful commits', async () => {
       const image = await normalizeImage(bytes, 'image/png')
       const written: string[] = []
@@ -241,7 +370,7 @@ test('private media and character lifecycle against PostgreSQL', {
       await cleanup
       const committed = await ownedAsset(db, 'alice', id)
       assert.ok((await getStorage().get(committed.source_key)).length)
-      assert.ok((await getStorage().get(committed.preview_key)).length)
+      assert.ok((await getStorage().get(committed.preview_key!)).length)
 
       const rolledBack: string[] = []
       await assert.rejects(db.begin(async (tx) => {
